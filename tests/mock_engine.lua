@@ -74,6 +74,7 @@ function mock.state()
 end
 
 function mock.new()
+	ug_require = nil
 	local w = {
 		time = 0,
 		nextId = 100,
@@ -138,7 +139,8 @@ function mock.new()
 
 	function w.addItems(sl, sid, cargo, n, fields)
 		for _ = 1, n do
-			local sc = { cargoType = cargo, sourceEntity = -1, pickupPoints = {}, startTime = w.time }
+			local sc = { cargoType = cargo, sourceEntity = -1, pickupPoints = {}, startTime = w.time, pickupTime = w.time,
+				deliveryExtensionDuration = 0 }
 			for k, v in pairs(fields or {}) do
 				sc[k] = copy(v)
 			end
@@ -215,11 +217,14 @@ function mock.new()
 		return w.new({ TRANSPORT_VEHICLE = { carrier = carrier or 0 } })
 	end
 
-	function w.line()
-		return w.new({ LINE = {} })
+	function w.line(owner)
+		return w.new({ LINE = {}, PLAYER_OWNED = { player = owner or w.player } })
 	end
 
+	-- items that left a stock: item -> { time, cargo = SimCargo }
+	w.removed = {}
 	local function destroy(item)
+		w.removed[item] = { time = w.time, cargo = w.comps[item].SIM_CARGO }
 		w.comps[item] = nil
 	end
 
@@ -419,6 +424,10 @@ function mock.new()
 		cmd = strict({
 			sendCommand = function(cmd, callback)
 				assert(callback == nil, "game scripts must not pass a callback")
+				if cmd.kind == "subsidy progress" then
+					w.scriptCommands = w.scriptCommands + 1
+					return
+				end
 				table.insert(w.commands, cmd)
 				if w.mode == "deferred" and cmd.kind == "set" then
 					table.insert(w.deferred, cmd)
@@ -459,6 +468,167 @@ function mock.new()
 	}
 	debugPrint = function(msg)
 		table.insert(w.log, tostring(msg))
+	end
+
+	---------------------------------------------------------------------------
+	-- The game's price code (w.gameCode()): cargo income functions, the
+	-- difficulty constant, the company and subsidy scripts. The engine's base
+	-- price for a delivery is difficulty x income function(params, time since
+	-- pickup without frozen time) x distance in km, as w.price computes it.
+	---------------------------------------------------------------------------
+
+	w.difficulty = 0.5
+	w.income = {
+		[1] = { initialPrice = 3.5, finalPrice = 2.0, decayRate = 0.0005 },
+		[2] = { initialPrice = 3.0, finalPrice = 2.5, decayRate = 0.0002 },
+		[3] = { initialPrice = 5.0, finalPrice = 4.0, decayRate = 0.0001 },
+		[4] = { initialPrice = 6.0, finalPrice = 5.0, decayRate = 0.0001 },
+		[5] = { initialPrice = 4.0, finalPrice = 3.0, decayRate = 0.0001 },
+	}
+	local INCOME_REF = "::/economy/cargotype.script@incomeFactors.decayFn"
+	function w.incomeFn(params, t)
+		return math.max(params.finalPrice, params.initialPrice - params.decayRate * t / 1000)
+	end
+
+	function w.positionOf(e)
+		local c = w.comps[e]
+		if c == nil then
+			return nil
+		end
+		if c.INDUSTRY ~= nil then
+			return w.positionOf(c.INDUSTRY.construction)
+		end
+		local bv = c.BOUNDING_VOLUME
+		if bv ~= nil then
+			return { x = (bv.bbox.min.x + bv.bbox.max.x) / 2, y = (bv.bbox.min.y + bv.bbox.max.y) / 2, z = bv.bbox.min.z }
+		end
+		for owner, oc in pairs(w.comps) do
+			local sl = (oc.INDUSTRY and oc.INDUSTRY.stockList) or (oc.TOWN_BUILDING and oc.TOWN_BUILDING.stockList)
+			if sl == e then
+				return w.positionOf(owner)
+			end
+		end
+		return nil
+	end
+
+	-- metres, the game's rule: aerial distance plus eight times the climb
+	function w.metres(a, b)
+		local d = math.sqrt((b.x - a.x) ^ 2 + (b.y - a.y) ^ 2)
+		if (b.z or 0) > (a.z or 0) then
+			d = d + 8 * (b.z - a.z)
+		end
+		return d
+	end
+
+	-- the engine's base price of a cargo item delivered to `dest` now
+	function w.price(sc, dest, at)
+		local t = math.max(0, (at or w.time) - sc.pickupTime - (sc.deliveryExtensionDuration or 0))
+		local km = w.metres(w.positionOf(sc.sourceEntity), w.positionOf(dest)) / 1000
+		return w.difficulty * w.incomeFn(w.income[sc.cargoType], t) * km, km
+	end
+
+	-- a delivery by one of the player's vehicles, as OnCalcTicketPrice reports it
+	function w.gameDelivery(cargo, source, destStockList, age, frozen, line)
+		local sc = { cargoType = cargo, sourceEntity = source, pickupPoints = {}, pickupTime = w.time - age,
+			deliveryExtensionDuration = frozen or 0 }
+		local item = w.new({ SIM_CARGO = sc })
+		local price, km = w.price(sc, destStockList)
+		return { { vehicleEntity = -1, lineEntity = line or -1, simEntity = item, stockListEntity = destStockList,
+			basePrice = price, distance = km } }
+	end
+
+	w.companyMultiplier = 0.8
+	w.subsidyLines = {} -- line -> multiplier the subsidy script answers
+	w.scriptCommands = 0
+
+	function w.gameCode(options)
+		options = options or {}
+		local company = w.new({ GAME_SCRIPT = { state = { multiplier = w.companyMultiplier } } })
+		local subsidies = w.new({ GAME_SCRIPT = { state = { counted = 0 } } })
+		local gs = {
+			["::/game_mechanics/company/company_progression.gs"] = company,
+			["::/game_mechanics/subventions/subventions.gs"] = subsidies,
+		}
+		w.gameScriptEntities = gs
+		local refs = {
+			[INCOME_REF] = w.incomeFn,
+			-- the company script answers its rank's multiplier for the player's lines
+			["::/game_mechanics/company/company_growth.script@handleEvent"] = function(_, state, _, _, name, param)
+				if name ~= "OnCalcTicketPrice" then
+					return nil
+				end
+				local out = {}
+				for i, p in ipairs(param) do
+					local po = w.comps[p.lineEntity] and w.comps[p.lineEntity].PLAYER_OWNED
+					if po ~= nil and po.player == w.player then
+						out[i] = state:get().multiplier
+					end
+				end
+				return out
+			end,
+			-- the subsidy script counts deliveries (in its state) and answers its bonuses;
+			-- it also tries to send a command, which must not reach the game
+			["::/game_mechanics/subventions/subventions.script@handleEvent"] = function(_, state, _, _, name, param)
+				if name ~= "OnCalcTicketPrice" then
+					return nil
+				end
+				local st = state:get()
+				st.counted = st.counted + #param
+				state:set(st)
+				api.cmd.sendCommand({ kind = "subsidy progress" })
+				local out = {}
+				for i, p in ipairs(param) do
+					out[i] = w.subsidyLines[p.lineEntity]
+				end
+				return out
+			end,
+		}
+		if options.noCompanyScript then
+			refs["::/game_mechanics/company/company_growth.script@handleEvent"] = nil
+		end
+		if options.noIncomeFunction then
+			refs[INCOME_REF] = nil
+		end
+		w.refs = refs
+		local modules = {
+			["::/scripts/util.tl"] = {
+				useFn = function(ref)
+					return refs[ref]
+				end,
+			},
+			["::/game_mechanics/company/company_progression_util.tl"] = {
+				getCompanyProgressionState = function(player)
+					assert(player == w.player)
+					return { ticketPriceMultiplier = w.companyMultiplier }
+				end,
+			},
+		}
+		ug_require = function(path)
+			local m = modules[path]
+			if m == nil then
+				error("module not found: " .. tostring(path))
+			end
+			return m
+		end
+		api.type.ComponentType.GAME_SCRIPT = "GAME_SCRIPT"
+		api.engine.system.gameScriptSystem = {
+			getEntityForGameScript = function(name)
+				return gs[name] or -1
+			end,
+		}
+		api.res.cargoTypeRep.get = function(c)
+			return { name = CARGO_NAMES[c], scriptRef = { fileName = INCOME_REF, params = copy(w.income[c]) } }
+		end
+		-- the subsidy script is found through its resource (relative handler), the company one by name
+		api.res.gameScriptRep = {
+			find = function(name)
+				return name == "::/game_mechanics/subventions/subventions.gs" and 7 or -1
+			end,
+			getAsTable = function(id)
+				assert(id == 7)
+				return { handleEventScript = { fileName = "subventions.script@handleEvent" } }
+			end,
+		}
 	end
 
 	-- the money booked on an account

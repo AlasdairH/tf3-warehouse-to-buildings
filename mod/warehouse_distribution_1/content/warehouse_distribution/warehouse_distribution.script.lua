@@ -23,12 +23,13 @@
 -- Payment: the base game pays only when a vehicle drops cargo at its final
 -- destination, so cargo that leaves a warehouse this way would never be
 -- paid. The mod pays it instead, like a delivery from where the cargo was
--- produced to the building that took it. The price per metre of each cargo
--- type is learned from the game's own deliveries (OnCalcTicketPrice), so it
--- follows the game's prices, era and difficulty. Until a price is known the
--- distance is kept (state.owed) and paid later. The money is booked as
--- transport income of the line and vehicle that brought the cargo to the
--- warehouse, like Paid Warehouse Deliveries (GlcrTE, MIT) does.
+-- produced to the building that took it, with the game's own price code:
+-- the cargo type's income function (time since pickup included), the
+-- company rank's multiplier and subsidy bonuses (see "The game's own price
+-- calculation"). Until a price is known the distance is kept (state.owed)
+-- and paid later. The money is booked as transport income of the line and
+-- vehicle that brought the cargo to the warehouse, like Paid Warehouse
+-- Deliveries (GlcrTE, MIT) does.
 --
 -- Reach: the buildings within a radius of the warehouse (mod option), and
 -- optionally all buildings in the catchment area of every station whose
@@ -62,8 +63,19 @@ local CONFIG = {
 	bookAfterDays = 1,
 	-- learned prices follow the last this many deliveries of a cargo type
 	rateSamples = 20,
-	-- deliveries shorter than this (metres) don't teach a price
-	minSampleDistance = 100,
+	-- the constant of the game's price formula and the distance unit follow
+	-- the last this many deliveries
+	calibrationSamples = 50,
+	unitSamples = 50,
+	-- the formula is used once this many deliveries agree on its constant
+	-- within this share
+	minCalibrationSamples = 5,
+	maxCalibrationDeviation = 0.05,
+	-- multipliers of the game's price scripts above this are ignored
+	maxMultiplier = 20,
+	-- deliveries shorter than this (metres, the mod's measure) don't teach
+	-- the distance unit, and teach nothing if the game reports no distance
+	minSampleDistance = 500,
 	-- a stock that refused cargo is skipped this many days
 	refusedDays = 30,
 	-- after the stock command had no effect, try again after this many years
@@ -129,6 +141,16 @@ local function field(t, k)
 		return v
 	end
 	return nil
+end
+
+-- a function of the api by its path, e.g. apiFn("res", "gameScriptRep",
+-- "find"); nil if the game doesn't have it
+local function apiFn(...)
+	local t = api
+	for _, k in ipairs({ ... }) do
+		t = t ~= nil and field(t, k) or nil
+	end
+	return t
 end
 
 local function exists(entity)
@@ -744,8 +766,9 @@ local function restore(stockList, before, after, form)
 end
 
 -- Moves `t.amount` items of t.supply.cargo from the warehouse stock to the
--- building's input stock. Returns the number of items the building got and
--- the SimCargo of the items that left the warehouse; or nil and a failure:
+-- building's input stock. Returns the number of items the building got, the
+-- SimCargo of the items that left the warehouse and the items that arrived
+-- at the building (entities); or nil and a failure:
 -- "noeffect" (the command changed nothing), "refused" (the building took
 -- nothing; the warehouse got its cargo back) or "unsafe" (something else
 -- changed; it was undone if possible).
@@ -786,6 +809,7 @@ local function move(s, w, t, warehouseTypes)
 
 	-- 2. give them to the building
 	local consumerTypes = { [c] = true }
+	local cItems = options.payment > 0 and itemsIn(csl, csid) or {}
 	local cBefore = snapshot(csl, consumerTypes)
 	local m = cBefore[csid .. ":" .. c] or 0
 	setAmount(csl, csid, m + k, used)
@@ -820,8 +844,8 @@ local function move(s, w, t, warehouseTypes)
 		end
 	end
 
-	-- the items that left the warehouse, for the payment
-	local left = {}
+	-- the items that left the warehouse and those that arrived, for the payment
+	local left, arrived = {}, {}
 	if options.payment > 0 then
 		local still = itemsIn(wsl, wsid)
 		local ids = {}
@@ -834,8 +858,335 @@ local function move(s, w, t, warehouseTypes)
 		for i = 1, math.min(got, #ids) do
 			table.insert(left, items[ids[i]])
 		end
+		for e, sc in pairs(itemsIn(csl, csid)) do
+			if cItems[e] == nil and sc.cargoType == c then
+				table.insert(arrived, e)
+			end
+		end
+		table.sort(arrived)
 	end
-	return got, left
+	return got, left, arrived
+end
+
+---------------------------------------------------------------------------
+-- The game's own price calculation
+---------------------------------------------------------------------------
+
+-- What the base game pays for delivering a cargo item (wiki, Modding Manual
+-- > Misc > Cargos; the OnCalcTicketPrice event):
+--
+--   base price = income function of the cargo type (its params, time since
+--                pickup) x distance x a constant (difficulty)
+--   paid       = base price x what the game scripts answer to
+--                OnCalcTicketPrice: the company rank's ticket price
+--                multiplier and subsidy bonuses
+--
+-- The mod calls the same code: each cargo type's income function (its
+-- resource's scriptRef, resolved with the game's util.useFn like the game
+-- resolves script references), and the handlers of the base game's scripts
+-- that answer OnCalcTicketPrice (company progression, subsidies), with a
+-- made-up event for the cargo handed out and a throw-away copy of their
+-- state, so nothing changes in them. The company rank's multiplier is also
+-- read from company_progression_util if its handler can't be called.
+--
+-- Two numbers aren't exposed and are measured from the game's own
+-- deliveries: the constant, and the unit of the event's distance (the
+-- event's distance against the mod's own measure). The formula is only used
+-- once the constant agrees across deliveries (CONFIG.maxCalibrationDeviation),
+-- which shows it explains the game's prices. Until then, or if a cargo
+-- type's income function can't be called, the price per distance learned
+-- for the cargo type is used, which misses the effect of time.
+
+-- per Lua state: what was found of the game's code (false: tried, not there)
+local game = { util = nil, income = {}, scripts = nil, progression = nil }
+
+local function gameRequire(paths)
+	for _, path in ipairs(paths) do
+		local ok, m = pcall(ug_require, path)
+		if ok and type(m) == "table" then
+			return m
+		end
+	end
+	return nil
+end
+
+-- resolves a script reference "file@function.path" with the game's util.useFn
+local function useFn(ref)
+	if game.util == nil then
+		local util = gameRequire({ "::/scripts/util.tl", "::/scripts/util.lua", "::/scripts/util" })
+		game.util = (util ~= nil and field(util, "useFn") ~= nil) and util or false
+	end
+	if not game.util then
+		return nil
+	end
+	local ok, f = pcall(game.util.useFn, ref)
+	if ok and f ~= nil then
+		return f
+	end
+	return nil
+end
+
+local function positive(v, max)
+	return type(v) == "number" and v == v and v > 0 and v <= (max or math.huge) and v < math.huge
+end
+
+-- the income function of cargo type c at time t (ms since pickup), as its
+-- resource names it; nil if it can't be called
+local function incomeFactor(c, t)
+	local entry = game.income[c]
+	if entry == nil then
+		entry = false
+		local ok, ct = pcall(apiFn("res", "cargoTypeRep", "get"), c)
+		local ref = ok and ct ~= nil and field(ct, "scriptRef") or nil
+		local file = ref ~= nil and field(ref, "fileName") or nil
+		local fn = type(file) == "string" and file ~= "" and useFn(file) or nil
+		if fn ~= nil then
+			entry = { fn = fn, params = field(ref, "params"), ref = file }
+		end
+		game.income[c] = entry
+	end
+	if not entry or t == nil then
+		return nil
+	end
+	local ok, v = pcall(entry.fn, entry.params, t)
+	if ok and positive(v) then
+		return v
+	end
+	return nil
+end
+
+-- Time since pickup in ms, as the income function takes it. "frozen" leaves
+-- out the time a specialized warehouse froze the delivery timer
+-- (SimCargo.deliveryExtensionDuration), "raw" counts it. Which one the game
+-- uses is measured: the right one makes the constant agree.
+local AGES = { "frozen", "raw" }
+
+local function ageOf(sc, now, how)
+	local pickup = field(sc, "pickupTime")
+	if type(pickup) ~= "number" or pickup < 0 or pickup > now then
+		return nil
+	end
+	local t = now - pickup
+	if how == "frozen" then
+		local ext = field(sc, "deliveryExtensionDuration")
+		if type(ext) == "number" and ext > 0 then
+			t = t - ext
+		end
+	end
+	return math.max(0, t)
+end
+
+local function copyOf(v, seen)
+	if type(v) ~= "table" then
+		return v
+	end
+	seen = seen or {}
+	if seen[v] ~= nil then
+		return seen[v]
+	end
+	local out = {}
+	seen[v] = out
+	for k, x in pairs(v) do
+		out[copyOf(k, seen)] = copyOf(x, seen)
+	end
+	return out
+end
+
+-- base game scripts that answer OnCalcTicketPrice: the name of their game
+-- script (its state) and spellings of their event handler
+local PRICE_SCRIPTS = {
+	{
+		key = "company",
+		gs = "::/game_mechanics/company/company_progression.gs",
+		handlers = {
+			"::/game_mechanics/company/company_growth.script@handleEvent",
+			"::/game_mechanics/company/company_progression.script@handleEvent",
+		},
+	},
+	{
+		key = "subsidies",
+		gs = "::/game_mechanics/subventions/subventions.gs",
+		handlers = { "::/game_mechanics/subventions/subventions.script@handleEvent" },
+	},
+}
+
+-- the handler a game script's resource names, resolved next to its .gs file
+local function handlerFromResource(gs)
+	local ok, id = pcall(apiFn("res", "gameScriptRep", "find"), gs)
+	if not ok or type(id) ~= "number" or id < 0 then
+		return nil
+	end
+	local okDesc, desc = pcall(apiFn("res", "gameScriptRep", "getAsTable"), id)
+	local ref = okDesc and desc ~= nil and field(field(desc, "handleEventScript") or {}, "fileName") or nil
+	if type(ref) ~= "string" or ref == "" then
+		return nil
+	end
+	if string.find(ref, "::", 1, true) == nil then
+		ref = (string.match(gs, "^(.*/)") or "") .. ref
+	end
+	return useFn(ref), ref
+end
+
+local function priceScripts()
+	if game.scripts == nil then
+		game.scripts = {}
+		for _, p in ipairs(PRICE_SCRIPTS) do
+			local fn, ref = handlerFromResource(p.gs)
+			for _, r in ipairs(p.handlers) do
+				if fn ~= nil then
+					break
+				end
+				fn, ref = useFn(r), r
+			end
+			if fn ~= nil then
+				table.insert(game.scripts, { key = p.key, gs = p.gs, fn = fn, ref = ref })
+			end
+			diag("game price script %s: %s", p.key, fn ~= nil and ("handler " .. tostring(ref)) or "not found")
+		end
+	end
+	return game.scripts
+end
+
+local function scriptState(gs)
+	local ok, e = pcall(apiFn("engine", "system", "gameScriptSystem", "getEntityForGameScript"), gs)
+	local c = ok and comp(e, field(CT(), "GAME_SCRIPT")) or nil
+	local st = c ~= nil and field(c, "state") or nil
+	if type(st) == "table" then
+		return st
+	end
+	local okId, id = pcall(apiFn("res", "gameScriptRep", "find"), gs)
+	if okId and type(id) == "number" and id >= 0 then
+		local okGet, res = pcall(apiFn("res", "gameScriptRep", "get"), id)
+		local okState, s = false, nil
+		if okGet and res ~= nil then
+			okState, s = pcall(function()
+				return res:getState()
+			end)
+		end
+		if okState and type(s) == "table" then
+			return s
+		end
+	end
+	return nil
+end
+
+-- Runs fn with api.cmd.sendCommand replaced by a function that drops the
+-- command, so that asking a game script can't change the game. Returns
+-- false if sendCommand can't be replaced (fn is not run then).
+local function withoutCommands(fn)
+	local cmd = api.cmd
+	local real = field(cmd, "sendCommand")
+	local dropped = 0
+	local replaced = pcall(function()
+		cmd.sendCommand = function()
+			dropped = dropped + 1
+		end
+	end)
+	if not replaced or field(cmd, "sendCommand") == real then
+		pcall(function()
+			cmd.sendCommand = real
+		end)
+		return false
+	end
+	local ok, result = pcall(fn)
+	pcall(function()
+		cmd.sendCommand = real
+	end)
+	if field(cmd, "sendCommand") ~= real then
+		error("could not restore api.cmd.sendCommand")
+	end
+	if dropped > 0 and not game.droppedLogged then
+		game.droppedLogged = true
+		diag("a game price script sent %d commands while asked about a price; they were dropped (logged once)", dropped)
+	end
+	return true, ok, result
+end
+
+-- What the base game's price scripts answer for `entries` (OnCalcTicketPrice
+-- entries): list of answers (index -> multiplier). Also says which scripts answered.
+local function askPriceScripts(entries)
+	local answers, asked = {}, {}
+	for _, script in ipairs(priceScripts()) do
+		local st = scriptState(script.gs)
+		if st ~= nil then
+			local fake = {
+				value = copyOf(st),
+				get = function(self)
+					return self.value
+				end,
+				get_native = function(self)
+					return self.value
+				end,
+				set = function() end,
+				set_native = function() end,
+				hasEventSubscriptions = function()
+					return true
+				end,
+				subscribeToEvent = function() end,
+				subscribeToAllEvents = function() end,
+				subscribeToNoEvents = function() end,
+			}
+			local run, ok, answer = withoutCommands(function()
+				return script.fn({}, fake, "", "TransportVehicleSystem", "OnCalcTicketPrice", entries)
+			end)
+			if run and ok then
+				table.insert(answers, type(answer) == "table" and answer or {})
+				asked[script.key] = true
+			elseif run then
+				report("price " .. script.key, "could not ask the game's " .. script.key .. " script about a price: " .. tostring(answer))
+			else
+				report("block", "can't block commands while asking the game's price scripts; leaving them out")
+			end
+		end
+	end
+	return answers, asked
+end
+
+-- the company rank's ticket price multiplier, from company_progression_util
+local function companyMultiplier()
+	if game.progression == nil then
+		game.progression = gameRequire({ "::/game_mechanics/company/company_progression_util.tl",
+			"::/game_mechanics/company/company_progression_util.lua" }) or false
+	end
+	if not game.progression then
+		return nil
+	end
+	local ok, data = pcall(game.progression.getCompanyProgressionState, api.engine.util.getPlayer())
+	local m = ok and data ~= nil and field(data, "ticketPriceMultiplier") or nil
+	return positive(m, 10) and m or nil
+end
+
+-- distance unit of the game's price events per metre of the mod's measure;
+-- nil while unknown (the game reported distances, but none could be compared yet)
+local function unitOf(s)
+	if s.unit ~= nil and s.unit.value ~= nil then
+		return s.unit.value
+	end
+	if s.sawEventDistance then
+		return nil
+	end
+	return 1
+end
+
+-- the base price (before multipliers) of a cargo item handed out over
+-- `d` metres now; nil if it isn't known yet. Also says how it was found.
+local function basePriceOf(s, c, sc, d, now)
+	local unit = unitOf(s)
+	if unit == nil then
+		return nil
+	end
+	local cal, how = rules.bestCalibration(s.calibration, CONFIG.minCalibrationSamples, CONFIG.maxCalibrationDeviation)
+	if cal ~= nil then
+		local f = incomeFactor(c, ageOf(sc, now, how))
+		if f ~= nil then
+			return cal.value * f * d * unit, "game formula (" .. how .. ")"
+		end
+	end
+	local rate = rules.rateFor(s.rates, c)
+	if rate ~= nil then
+		return rate * d * unit, "learned price per distance"
+	end
+	return nil
 end
 
 ---------------------------------------------------------------------------
@@ -870,36 +1221,92 @@ local function book(account, amount, carrier, at)
 	api.cmd.sendCommand(api.cmd.makeJournalBookAssetCmd(account, entry, pos))
 end
 
--- notes the money for cargo that `w` handed to `consumer`
-local function charge(s, w, consumer, c, left, now)
-	local rate = rules.rateFor(s.rates, c)
+-- Notes the money for cargo that `w` handed to `consumer`: `left` are the
+-- SimCargo of the items that left the warehouse, `arrived` the items the
+-- building got (they stand in for them in the price scripts' event).
+local function charge(s, w, consumer, c, left, arrived, now)
 	local to = spot(consumer.footprint)
 	local from0 = w.footprint ~= nil and spot(w.footprint) or to
-	local key = w.construction
-	for _, sc in ipairs(left) do
-		local d = rules.paidDistance(originOf(sc) or from0, to) * options.payment
-		if rate == nil then
-			s.owed[c] = (s.owed[c] or 0) + d
+	local items, entries = {}, {}
+	for i, sc in ipairs(left) do
+		local d = rules.paidDistance(originOf(sc) or from0, to)
+		local line, vehicle = lastCarrierOf(sc)
+		local base, how = basePriceOf(s, c, sc, d, now)
+		items[i] = { d = d, line = line, vehicle = vehicle, base = base, how = how }
+		local unit = unitOf(s) or 1
+		entries[i] = {
+			vehicleEntity = vehicle,
+			lineEntity = line,
+			simEntity = arrived[i] or arrived[#arrived] or -1,
+			stockListEntity = consumer.stockList,
+			basePrice = base or 0,
+			distance = d * unit,
+		}
+	end
+	if #items == 0 then
+		return
+	end
+
+	-- multipliers: the game's price scripts, else the company rank alone
+	local answers, asked = askPriceScripts(entries)
+	local company = nil
+	if not asked.company then
+		company = companyMultiplier()
+	end
+
+	local total, n = 0, 0
+	local hows = {}
+	for i, it in ipairs(items) do
+		local m = rules.combine(answers, i, CONFIG.maxMultiplier) * (company or 1) * options.payment
+		if asked.company and not valid(it.line) then
+			-- the company script answers for the player's lines; an item with no
+			-- known line still pays the rank's multiplier
+			m = m * (companyMultiplier() or 1)
+		end
+		if it.base == nil then
+			-- price not known yet: keep the distance, with the multipliers of now
+			s.owed[c] = (s.owed[c] or 0) + it.d * m
 		else
-			local u = s.unbooked[key]
+			local amount = it.base * m
+			local u = s.unbooked[w.construction]
 			if u == nil then
 				u = { amount = 0, since = now, vehicles = {} }
-				s.unbooked[key] = u
+				s.unbooked[w.construction] = u
 			end
-			local line, vehicle = lastCarrierOf(sc)
-			local g = u.vehicles[vehicle]
+			local g = u.vehicles[it.vehicle]
 			if g == nil then
-				g = { line = line, amount = 0 }
-				u.vehicles[vehicle] = g
+				g = { line = it.line, amount = 0 }
+				u.vehicles[it.vehicle] = g
 			end
-			g.amount = g.amount + d * rate
-			u.amount = u.amount + d * rate
+			g.amount = g.amount + amount
+			u.amount = u.amount + amount
+			total, n = total + amount, n + 1
+			hows[it.how] = true
 		end
+	end
+	if n > 0 then
+		local parts = {}
+		for h in pairs(hows) do
+			table.insert(parts, h)
+		end
+		table.sort(parts)
+		local scripts = {}
+		for k in pairs(asked) do
+			table.insert(scripts, k)
+		end
+		table.sort(scripts)
+		diag("price of %d %s handed out: %.0f (%s; multipliers from %s%s)", n, cargoName(c), total,
+			table.concat(parts, ", "), #scripts > 0 and table.concat(scripts, ", ") or "no game script",
+			company ~= nil and string.format(", company rank x%.3f", company) or "")
 	end
 end
 
 -- distances owed for cargo types whose price is known now
 local function settleOwed(s, now)
+	local unit = unitOf(s)
+	if unit == nil then
+		return
+	end
 	for c, d in pairs(s.owed) do
 		local rate = rules.rateFor(s.rates, c)
 		if rate ~= nil then
@@ -908,9 +1315,9 @@ local function settleOwed(s, now)
 				u = { amount = 0, since = now, vehicles = {} }
 				s.unbooked[0] = u
 			end
-			u.amount = u.amount + d * rate
+			u.amount = u.amount + d * rate * unit
 			s.owed[c] = nil
-			diag("paying %.0f m of %s delivered before its price was known", d, cargoName(c))
+			diag("paying %.0f m of %s handed out before its price was known", d, cargoName(c))
 		end
 	end
 end
@@ -962,32 +1369,50 @@ local function flush(s, now, warehouseByKey)
 	end
 end
 
--- learns the price per metre from the game's own cargo deliveries
-local function learn(s, entries)
+-- Measures the game's prices from its own cargo deliveries: the unit of the
+-- event's distance, the price per distance of each cargo type, and the
+-- constant of the formula for each way of counting time.
+local function learn(s, entries, now)
 	local changed = false
 	for _, p in ipairs(entries) do
 		local sl, sim = field(p, "stockListEntity"), field(p, "simEntity")
-		local price, eventDistance = field(p, "basePrice"), field(p, "distance")
+		local price, e = field(p, "basePrice"), field(p, "distance")
 		local sc = valid(sl) and comp(sim, CT().SIM_CARGO) or nil
-		if sc ~= nil and cargoType(sc.cargoType) and type(price) == "number" and price > 0 then
+		if sc ~= nil and cargoType(sc.cargoType) and positive(price) then
+			local c = sc.cargoType
 			local from = originOf(sc)
 			local dest = footprintOf(sl)
 			local d = (from ~= nil and dest ~= nil) and rules.paidDistance(from, spot(dest)) or nil
-			if d ~= nil and d >= CONFIG.minSampleDistance and type(eventDistance) == "number" and eventDistance > 0 then
-				-- how the event's distance compares with ours, for deliveries we can't measure
-				s.distanceScale, s.distanceSamples = rules.learnRate(s.distanceScale, s.distanceSamples,
-					d / eventDistance, CONFIG.rateSamples)
-			elseif (d == nil or d < CONFIG.minSampleDistance) and type(eventDistance) == "number" then
-				d = eventDistance * (s.distanceScale or 1)
+			if positive(e) then
+				s.sawEventDistance = true
+				if d ~= nil and d >= CONFIG.minSampleDistance then
+					s.unit = rules.calibrate(s.unit, e / d, CONFIG.unitSamples)
+				end
+			else
+				e = nil
 			end
-			if d ~= nil and d >= CONFIG.minSampleDistance then
-				local c = sc.cargoType
+			-- the delivery's distance in the event's unit: the game's own, else ours converted
+			local dist = e
+			if dist == nil and d ~= nil and d >= CONFIG.minSampleDistance then
+				dist = d * (unitOf(s) or 1)
+			end
+			if dist ~= nil then
 				local before = s.rates[c]
-				s.rates[c], s.rateSamples[c] = rules.learnRate(s.rates[c], s.rateSamples[c], price / d, CONFIG.rateSamples)
+				s.rates[c], s.rateSamples[c] = rules.learnRate(s.rates[c], s.rateSamples[c], price / dist, CONFIG.rateSamples)
+				local ks = {}
+				for _, how in ipairs(AGES) do
+					local f = incomeFactor(c, ageOf(sc, now, how))
+					if f ~= nil then
+						s.calibration[how] = rules.calibrate(s.calibration[how], price / (f * dist), CONFIG.calibrationSamples)
+						table.insert(ks, string.format("%s %.4g (spread %.1f%%)", how, s.calibration[how].value,
+							100 * s.calibration[how].dev))
+					end
+				end
 				changed = true
-				if before == nil then
-					diag("learned price of %s: %.4f per m (delivery of %.0f m paid %.0f; event distance %s)",
-						cargoName(c), s.rates[c], d, price, tostring(eventDistance))
+				if before == nil or diagCount < CONFIG.diagnosticsLimit / 2 then
+					diag("game delivery of %s: base price %.1f for distance %.4g (%s m measured); constant: %s",
+						cargoName(c), price, dist, d ~= nil and string.format("%.0f", d) or "not",
+						#ks > 0 and table.concat(ks, ", ") or "income function not found")
 				end
 			end
 		end
@@ -1009,6 +1434,9 @@ local function newState(now)
 		budget = {},
 		rates = {},
 		rateSamples = {},
+		calibration = {},
+		unit = nil,
+		sawEventDistance = false,
 		owed = {},
 		unbooked = {},
 		pending = 0,
@@ -1025,7 +1453,7 @@ local function readState(state, now)
 		s = newState(now)
 		fresh = true
 	end
-	for _, k in ipairs({ "budget", "rates", "rateSamples", "owed", "unbooked" }) do
+	for _, k in ipairs({ "budget", "rates", "rateSamples", "calibration", "owed", "unbooked" }) do
 		if type(s[k]) ~= "table" then
 			s[k] = {}
 		end
@@ -1158,6 +1586,7 @@ local function distribute(s, w, now, dt)
 	local plan = rules.plan(supply, demands, n)
 	for _, t in ipairs(plan) do
 		local got, left, why = move(s, w, t, holds)
+		local arrived = why
 		if got == nil then
 			if left == "refused" or (left == "noeffect" and s.verified) then
 				-- the command worked elsewhere, so this stock won't take part: the
@@ -1175,7 +1604,10 @@ local function distribute(s, w, now, dt)
 			s.moved = (s.moved or 0) + got
 			s.budget[w.construction] = math.max(0, s.budget[w.construction] - got)
 			if options.payment > 0 then
-				charge(s, w, t.demand.consumer, t.supply.cargo, left, now)
+				local okCharge, err = pcall(charge, s, w, t.demand.consumer, t.supply.cargo, left, arrived, now)
+				if not okCharge then
+					report("charge", "error while pricing cargo handed out (it is not paid): " .. tostring(err))
+				end
 			end
 			diag("warehouse %d -> %s %d (stock %d): %d %s", w.construction, t.demand.consumer.kind,
 				t.demand.consumer.entity, t.demand.stockId, got, cargoName(t.supply.cargo))
@@ -1253,8 +1685,12 @@ function M.update(_userParams, state, dt)
 		local elapsed = math.min(math.max(0, now - last), day())
 		s.lastTick = now
 		nextCheck = now + interval
-		tick(s, now, elapsed)
+		-- cargo moved before an error must still be counted: save the state either way
+		local okTick, err = pcall(tick, s, now, elapsed)
 		state:set(s)
+		if not okTick then
+			error(err, 0)
+		end
 	end)
 	if not ok then
 		report("error", "error: " .. tostring(err))
@@ -1305,7 +1741,7 @@ function M.handleEvent(_userParams, state, _src, id, name, param)
 		if options == nil then
 			options = readOptions()
 		end
-		if learn(s, entries) then
+		if learn(s, entries, gameTime()) then
 			state:set(s)
 		end
 	end)

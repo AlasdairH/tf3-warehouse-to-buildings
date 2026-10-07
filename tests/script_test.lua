@@ -359,7 +359,9 @@ return function(test, env)
 		local w, M, state, s = paidScene()
 		-- a delivery of coal from the mine to the mill: 5,100 m for 510
 		assert(event(M, state, w.delivery(COAL, s.mine, s.msl, 510, 5.1)) == nil, "never changes the price")
-		assert(math.abs(state.value.rates[COAL] - 0.1) < 1e-9, tostring(state.value.rates[COAL]))
+		-- 100 per unit of the game's distance, which is 1/1000 of a metre of the mod's measure
+		assert(math.abs(state.value.rates[COAL] - 100) < 1e-9, tostring(state.value.rates[COAL]))
+		assert(math.abs(state.value.unit.value - 0.001) < 1e-12, tostring(state.value.unit.value))
 		run(w, M, state, 40)
 		assert(w.count(s.msl, 0, COAL) == 20)
 		-- each item 5,100 m (mine to mill) at 0.1 a metre
@@ -416,15 +418,24 @@ return function(test, env)
 		assert(w.count(s.msl, 0, COAL) == 20 and #w.bookings == 0)
 	end)
 
-	test("a delivery whose ends are unknown is measured with the event's distance, scaled", function()
+	test("a delivery whose ends are unknown still teaches the price per distance of the game's unit", function()
 		local w, M, state, s = paidScene()
 		-- known delivery: our 5,100 m, the event says 5.1 (a km figure)
 		event(M, state, w.delivery(COAL, s.mine, s.msl, 510, 5.1))
-		-- unknown destination: the event's 10.2 is 10,200 m with the learned scale, so 0.05 a metre
+		-- stock list -1 is no cargo delivery: nothing learned
 		event(M, state, w.delivery(IRON, -1, -1, 510, 10.2))
-		-- (stock list -1 is no cargo delivery; use an unknown one)
+		assert(state.value.rates[IRON] == nil)
+		-- unknown source and destination: 510 for 10.2 units
 		event(M, state, w.delivery(IRON, -1, 99999, 510, 10.2))
-		assert(math.abs(state.value.rates[IRON] - 0.05) < 1e-6, tostring(state.value.rates[IRON]))
+		assert(math.abs(state.value.rates[IRON] - 50) < 1e-9, tostring(state.value.rates[IRON]))
+		-- iron handed out over 5,100 m: 50 x 5,100 x 0.001 = 255 each
+		local _, wsl2 = w.warehouse(0, 2000, { { 50 } })
+		w.addItems(wsl2, 0, IRON, 4, { sourceEntity = s.mine })
+		local _, isl = w.industry(100, 2000, { { IRON, 4 } })
+		run(w, M, state, 40)
+		assert(w.count(isl, 0, IRON) == 4)
+		assert(math.abs(w.booked(w.player) - 20 * 510 - 4 * 50 * w.metres({ x = -5000, y = 0 }, { x = 100, y = 2000 }) * 0.001) <= 2,
+			w.booked(w.player))
 	end)
 
 	test("event data that is an engine object, not a plain table, teaches too", function()
@@ -438,7 +449,134 @@ return function(test, env)
 			end })
 		end
 		event(M, state, proxy(entries))
-		assert(state.value ~= nil and math.abs(state.value.rates[COAL] - 0.1) < 1e-9)
+		assert(state.value ~= nil and math.abs(state.value.rates[COAL] - 100) < 1e-9)
+	end)
+
+	---------------------------------------------------------------------------
+	-- With the game's price code
+	---------------------------------------------------------------------------
+
+	-- the game's deliveries of each cargo type: young and old items, some with a frozen timer
+	local function calibrate(w, M, state, s)
+		for i = 1, 8 do
+			event(M, state, w.gameDelivery(COAL, s.mine, s.msl, i * 400000, (i % 3) * 1000000, s.line))
+		end
+	end
+
+	-- what the game would pay for the cargo the warehouse handed out to `dest`:
+	-- its base price when it left, times `multiplier`
+	local function expected(w, dest, multiplier)
+		local sum, n = 0, 0
+		for _, r in pairs(w.removed) do
+			sum = sum + w.price(r.cargo, dest, r.time) * multiplier
+			n = n + 1
+		end
+		return sum, n
+	end
+
+	-- the paid scene, its coal picked up long ago, partly frozen in a specialized warehouse
+	local function gameScene(options)
+		local w, M, state, s = paidScene()
+		w.gameCode(options)
+		-- game time is positive in a real game; -1 would mean "not picked up"
+		w.advance(5000000)
+		local list = w.items[s.wsl][0]
+		for i, item in ipairs(list) do
+			local sc = w.comps[item].SIM_CARGO
+			sc.pickupTime = w.time - i * 50000
+			sc.deliveryExtensionDuration = (i % 2) * 40000
+		end
+		w.setOption("wdist_speed", 5)
+		return w, M, state, s
+	end
+
+	test("game price code: cargo handed out is paid exactly as the game prices a delivery", function()
+		local w, M, state, s = gameScene()
+		calibrate(w, M, state, s)
+		local cal = state.value.calibration
+		assert(math.abs(cal.frozen.value - 0.5) < 1e-9 and cal.frozen.dev < 1e-9, "the game's constant, measured")
+		assert(cal.raw.dev > 0.05, "counting frozen time doesn't explain the game's prices")
+		run(w, M, state, 5)
+		assert(w.count(s.msl, 0, COAL) == 20)
+		local want, n = expected(w, s.msl, 0.8)
+		assert(n == 20)
+		-- the player gets the money to the unit (fractions carried), line and vehicle the rounded amounts
+		assert(math.abs(w.booked(w.player) - want) < 1, w.booked(w.player) .. " vs " .. want)
+		assert(math.abs(w.booked(s.line) - want) < 2 and math.abs(w.booked(s.truck) - want) < 2)
+	end)
+
+	test("game price code: time counts, an older item pays less", function()
+		local w, M, state, s = gameScene()
+		calibrate(w, M, state, s)
+		run(w, M, state, 5)
+		local young, old = nil, nil
+		for _, r in pairs(w.removed) do
+			local p = w.price(r.cargo, s.msl, r.time)
+			young = math.max(young or p, p)
+			old = math.min(old or p, p)
+		end
+		assert(old < young * 0.9, "the items' ages make a difference in this scene")
+		assert(math.abs(w.booked(w.player) - expected(w, s.msl, 0.8)) < 1)
+	end)
+
+	test("game price code: the subsidy script's bonus counts; it can't change the game", function()
+		local w, M, state, s = gameScene()
+		w.subsidyLines[s.line] = 2
+		calibrate(w, M, state, s)
+		run(w, M, state, 5)
+		assert(math.abs(w.booked(w.player) - expected(w, s.msl, 0.8 * 2)) < 1, w.booked(w.player))
+		assert(w.scriptCommands == 0, "the subsidy script's commands were dropped")
+		assert(w.comps[w.gameScriptEntities["::/game_mechanics/subventions/subventions.gs"]].GAME_SCRIPT.state.counted == 0,
+			"its state is untouched")
+		assert(api.cmd.sendCommand ~= nil)
+		local sent = #w.commands
+		api.cmd.sendCommand({ kind = "book", account = 5, entry = { amount = 1 } })
+		assert(#w.commands == sent + 1, "sendCommand works again afterwards")
+	end)
+
+	test("game price code: without the company script, its rank multiplier comes from company_progression_util", function()
+		local w, M, state, s = gameScene({ noCompanyScript = true })
+		w.companyMultiplier = 0.7
+		calibrate(w, M, state, s)
+		run(w, M, state, 5)
+		assert(math.abs(w.booked(w.player) - expected(w, s.msl, 0.7)) < 1, w.booked(w.player))
+	end)
+
+	test("game price code: an item with no known line still pays the company rank's multiplier", function()
+		local w, M, state, s = gameScene()
+		for _, item in ipairs(w.items[s.wsl][0]) do
+			w.comps[item].SIM_CARGO.pickupPoints = {}
+		end
+		calibrate(w, M, state, s)
+		run(w, M, state, 5)
+		assert(math.abs(w.booked(w.player) - expected(w, s.msl, 0.8)) < 1, w.booked(w.player))
+	end)
+
+	test("game price code: if the formula doesn't explain the game's prices, the learned price is used", function()
+		local w, M, state, s = gameScene()
+		-- prices the formula can't explain
+		local real = w.price
+		local i = 0
+		w.price = function(sc, dest, at)
+			i = i + 1
+			local p, km = real(sc, dest, at)
+			return p * (1 + 0.3 * math.sin(i)), km
+		end
+		calibrate(w, M, state, s)
+		w.price = real
+		assert(state.value.calibration.frozen.dev > 0.05)
+		run(w, M, state, 5)
+		-- 20 items at the learned price per distance, times the company multiplier
+		local per = state.value.rates[COAL] * w.metres({ x = -5000, y = 0 }, { x = 100, y = 0 }) * state.value.unit.value
+		assert(math.abs(w.booked(w.player) - 20 * per * 0.8) < 1, w.booked(w.player))
+	end)
+
+	test("game price code: a cargo type whose income function can't be called uses its learned price", function()
+		local w, M, state, s = gameScene({ noIncomeFunction = true })
+		calibrate(w, M, state, s)
+		assert(next(state.value.calibration) == nil)
+		run(w, M, state, 5)
+		assert(w.count(s.msl, 0, COAL) == 20 and w.booked(w.player) > 0)
 	end)
 
 	test("passenger tickets teach nothing and the handler ignores other events", function()

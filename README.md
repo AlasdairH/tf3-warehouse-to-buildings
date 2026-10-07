@@ -4,7 +4,7 @@ A Transport Fever 3 script mod: your warehouses hand their cargo to the industri
 
 In the base game a warehouse is only storage for vehicles. The game manual says: *"Town buildings and factories do not have access to the warehouse's content. They rely on you to transport their cargo from or to them."* This mod gives them that access.
 
-> **Status: untested in the game.** Everything below is built against the official script API documentation and tested offline against a mock of the engine (43 tests, Lua 5.1, 5.2 and LuaJIT). The mod moves cargo with a command the game files under `debug`, and nobody has confirmed yet that the command works in a normal game. Do the [first test in the game](#first-test-in-the-game) on a new game or a copy of a save before you rely on it.
+> **Status: untested in the game.** Everything below is built against the official script API documentation and tested offline against a mock of the engine (50 tests, Lua 5.1, 5.2 and LuaJIT). The mod moves cargo with a command the game files under `debug`, and nobody has confirmed yet that the command works in a normal game. Do the [first test in the game](#first-test-in-the-game) on a new game or a copy of a save before you rely on it.
 
 ## What it does
 
@@ -20,15 +20,29 @@ In the base game a warehouse is only storage for vehicles. The game manual says:
 
 The base game pays for cargo only when a vehicle drops it at its final destination. Cargo handed out by a warehouse never gets there on a vehicle, so the game would never pay for it, and the line that filled the warehouse would earn nothing.
 
-The mod pays it instead, like a delivery **from where the cargo was produced to the building that took it**:
+The mod pays it instead, **like a delivery from where the cargo was produced to the building that took it, using the game's own price code**. The game prices a cargo delivery like this:
 
-- **Price per metre:** learned for each cargo type from the game's own deliveries. Every time one of your vehicles delivers cargo, the game reports the base price and the mod divides it by the delivery's distance. The price therefore follows the game's era, difficulty and cargo prices without the mod knowing the formula.
-  - If a cargo type hasn't been delivered by a vehicle yet, the average of the known prices is used.
-  - If no price is known at all yet, the distance is kept and paid as soon as one is.
-- **Distance:** horizontal distance plus eight times any climb, as the game's manual describes for cargo income.
-- **Where it shows up:** the money is booked once per warehouse and day, shown above the warehouse. It counts as transport income of the line and vehicle that brought the cargo to the warehouse, so it appears in the finance window and in the line and vehicle statistics.
-- **Share:** the option pays 100% (default), 50% or nothing.
-- **Infinite money:** nothing is booked.
+- **Base price:** the cargo type's income function × distance × a constant. The income function depends on the cargo type and the time since the item was picked up. The constant reflects difficulty. Distance is the straight-line distance plus eight times any climb.
+- **Paid:** the base price × what the game's scripts answer when the game asks for the price of the delivery (the `OnCalcTicketPrice` event). That covers the company rank's ticket price multiplier and subsidy bonuses.
+
+For each item handed out, the mod calls the same code:
+
+| Part | How |
+|---|---|
+| Income function, including the time since pickup | Each cargo type's own function, named in its resource (`scriptRef`) and called through the game's `util.useFn`. |
+| Time since pickup | Counted from the item's pickup time. Time a specialized warehouse froze the delivery timer (`deliveryExtensionDuration`) is left out if that's what the game does; the mod measures which way matches the game's prices. |
+| Company rank multiplier and subsidy bonuses | The base game's own company and subsidy scripts are asked about a made-up delivery event, the same question the game asks them. They get a throw-away copy of their state, and any command they send is dropped, so asking can't change anything in the game. If the company script can't be asked, the rank multiplier is read from `company_progression_util`. |
+| The constant (difficulty) and the unit of the game's distances | Not exposed, so they're **measured** from the game's own deliveries. Every time one of your vehicles delivers cargo, the game reports the base price and distance, and the mod works out the constant. The formula is only used once at least 5 deliveries agree on it within 5%. That shows the mod is calling the same code the game uses. |
+
+If part of it isn't available, the mod falls back as follows:
+
+- If a cargo type's income function can't be called, or the measured constant doesn't agree across deliveries, it uses the average price per distance learned for that cargo type. That misses the time since pickup.
+- If no multiplier is available, it uses ×1.
+- Cargo handed out before the game has priced any delivery is paid once it has, at the learned price per distance.
+
+The diagnostics log says which method priced each hand-out.
+
+The money is booked once per warehouse and day, shown above the warehouse. It counts as transport income of the line and vehicle that brought the cargo to the warehouse, so it appears in the finance window and in the line and vehicle statistics. The option pays 100% (default), 50% or nothing. With infinite money nothing is booked.
 
 This works alongside [Paid Warehouse Deliveries](https://github.com/GlcrTE/TF3-Paid-Warehouse-Deliveries). That mod pays a handling fee when cargo goes *into* a warehouse; this one pays the delivery when it comes *out*.
 
@@ -51,7 +65,7 @@ The command lives under `debug`, so the mod treats every use as an experiment:
 5. If the command **does nothing at all**, the mod stops and says so in the log. That probably means debug commands need Debug Mode. It tries again a year later.
 6. The **first move of a game is a single item**, so if the command misbehaves, very little is at stake.
 
-Price learning listens to the game's `OnCalcTicketPrice` event and never changes the price.
+Price measuring listens to the game's `OnCalcTicketPrice` event and never changes the price.
 
 The game runs game scripts in several Lua states, so everything that must survive (budgets, prices, unpaid money, the stop flag) lives in the script state, which is saved with the game. Module variables are only caches.
 
@@ -85,7 +99,12 @@ Use a new free game, or a copy of a save, and set **Diagnostics in the game log:
 2. **Hand-out:** once coal is in the warehouse, open the steel mill's window. Within a few in-game days coal should appear in its input stock, and the warehouse's coal should drop by the same amount. The log shows `buildings in reach` and lines like `warehouse … -> industry … (stock 0): 1 coal.cargo`.
 3. **If the log says `stopped: the stock command changed nothing`**, turn on Debug Mode (Settings > Advanced), load the game again and repeat. If it still stops, the command isn't usable from a mod and the mod can't work as built. Please report it.
 4. **If the log says `stopped: … changed: …`**, the command behaves differently than expected. The line says what changed. Please report it.
-5. **Payment:** let any vehicle deliver cargo straight to an industry somewhere, so the mod learns a price. The log shows `learned price of …: … per m (delivery of … m paid …; event distance …)`. Then compare the income above the warehouse with what a direct delivery over the same distance pays. If it's far off, the `event distance` figure in that line shows why.
+5. **Payment:** let a few vehicles deliver cargo straight to industries or towns, so the mod can measure the game's prices. Then check the log:
+   - `game price script company: handler …` and `… subsidies: handler …` mean the game's own price scripts were found. `not found` means they weren't, and the rank multiplier comes from `company_progression_util` instead.
+   - `game delivery of …: … constant: frozen 0.5 (spread 0.0%), raw …` is one line per delivery. A spread near 0% for one of the two means the mod is calling the same price code as the game. If both spreads stay high, or it says `income function not found`, please send those lines.
+   - `price of … handed out: … (game formula (frozen); multipliers from company, subsidies)` is the method used for each hand-out. `learned price per distance` means the fallback was used.
+   
+   Then compare the income shown above the warehouse with the income above a truck that delivers the same cargo over a similar distance.
 6. **Mixed module:** put two cargo types into one universal module, of which the building takes only one. The other one must stay.
 7. **Town:** a warehouse with goods near the commercial or industrial district. Check the buildings' supply in their window and the town's cargo supply rating.
 8. **Save and load:** distribution continues and nothing is paid twice.
@@ -95,7 +114,9 @@ Use a new free game, or a copy of a save, and set **Diagnostics in the game log:
 - **Debug command.** It may need Debug Mode, and a game update may change or remove it. The mod checks every use and stops rather than guess.
 - **Town growth.** The game gives towns XP when cargo arrives on a vehicle. Cargo handed out by a warehouse probably gives none. Whether a building's *supply* counts it is part of the in-game test.
 - **Statistics.** The industry and town windows won't list the warehouse as a supplier, and cargo handed out won't show in their "delivered" figures.
-- **Payment is an estimate.** It uses the game's base price per metre for the cargo type. It doesn't apply the company-rank ticket multiplier or subsidies, and ignores how long the cargo took.
+- **Payment relies on internals.** It calls the base game's own price code, but the paths of the company and subsidy scripts and how they're called come from reading the game's scripts, not from documentation. Each part is checked, falls back to the learned price or ×1 if missing, and the log says what was used.
+  - Handed-out cargo doesn't count towards a subsidy's progress, because only a copy of the subsidy script's state is used.
+  - Other mods that change prices through `OnCalcTicketPrice` aren't asked.
 - **Which items leave** a warehouse is up to the game. Handed-out cargo arrives at the building as new items.
 - **Not built for multiplayer.**
 

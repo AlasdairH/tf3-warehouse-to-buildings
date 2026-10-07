@@ -183,6 +183,49 @@ function rules.learnRate(rate, samples, sample, cap)
 	return rate + (sample - rate) / n, samples + 1
 end
 
+-- A constant measured from samples: running average `value`, the number of
+-- samples `n` and `dev`, the average relative deviation of the samples from
+-- the average. A constant that a formula should explain exactly has dev
+-- near 0; a large dev means the formula doesn't explain the samples.
+function rules.calibrate(cal, sample, cap)
+	if type(cal) ~= "table" or cal.value == nil or (cal.n or 0) <= 0 then
+		return { value = sample, n = 1, dev = 0 }
+	end
+	local n = math.min(cal.n + 1, cap)
+	local dev = cal.dev + (math.abs(sample / cal.value - 1) - cal.dev) / n
+	return { value = cal.value + (sample - cal.value) / n, n = cal.n + 1, dev = dev }
+end
+
+-- The calibration to use among `cals` (key -> calibration): the one whose
+-- samples agree best, if it has at least `minSamples` and agrees within
+-- `maxDeviation`; nil if none does. Returns it and its key.
+function rules.bestCalibration(cals, minSamples, maxDeviation)
+	local best, bestKey = nil, nil
+	for key, cal in pairs(cals or {}) do
+		if type(cal) == "table" and cal.value ~= nil and cal.n >= minSamples and cal.dev <= maxDeviation then
+			if best == nil or cal.dev < best.dev or (cal.dev == best.dev and tostring(key) < tostring(bestKey)) then
+				best, bestKey = cal, key
+			end
+		end
+	end
+	return best, bestKey
+end
+
+-- Product of the multipliers game scripts answer for one event entry, like
+-- the game combines them. `answers` is a list of the scripts' results
+-- (index -> multiplier, or nil for no change); values outside (0, maxValue]
+-- are ignored.
+function rules.combine(answers, index, maxValue)
+	local m = 1
+	for _, answer in ipairs(answers) do
+		local v = type(answer) == "table" and answer[index] or nil
+		if type(v) == "number" and v > 0 and v <= maxValue then
+			m = m * v
+		end
+	end
+	return m
+end
+
 -- Rate per metre for a cargo type: its own, else the average of the known
 -- ones, else nil (not known yet).
 function rules.rateFor(rates, cargo)

@@ -54,7 +54,7 @@
             "defaultIndex": 2,
             "key": "wdist_payment",
             "name": "Payment for cargo handed out",
-            "tooltip": "Cargo a warehouse hands out never reaches its destination on a vehicle, so the game doesn't pay for it. The mod pays it like a delivery from where the cargo was produced to the building that took it, at the price the game pays for that cargo type, as income of the line that brought it to the warehouse.",
+            "tooltip": "Cargo a warehouse hands out never reaches its destination on a vehicle, so the game doesn't pay for it. The mod pays it like a delivery from where the cargo was produced to the building that took it, with the game's own price calculation (cargo type, time since pickup, company rank, subsidies), as income of the line that brought it to the warehouse.",
             "uiType": "ComboBox",
             "values": [
                 "None",
