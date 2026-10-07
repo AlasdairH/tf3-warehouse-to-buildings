@@ -1,0 +1,16 @@
+{
+    "authors": [
+        {
+            "name": "alasdair",
+            "role": "CREATOR"
+        }
+    ],
+    "description": "In the base game, industries and town buildings can't take cargo out of a warehouse; it has to be loaded onto a vehicle again. With this mod your warehouses hand their cargo to the industries and town buildings around them that take it, so a warehouse works as a buffer: a train or truck fills it, and it keeps the buildings in reach supplied. Reach is a radius around the warehouse (100 to 500 m) and, optionally, the catchment area of every station whose catchment area holds the warehouse. Cargo goes to the emptiest input stock first, up to a number of items per warehouse and month. Because cargo handed out this way never reaches its destination on a vehicle, the game would not pay for it; the mod pays it like a delivery from where it was produced, at the price the game pays for that cargo type, as income of the line that brought it to the warehouse. The mod moves cargo with the game's stock command (api.cmd.debug.makeStockSetCargoAmountCmd) and checks every move; if the game doesn't apply it, or it changes anything else, the mod stops and writes why to the game log.",
+    "name": "Warehouse Distribution",
+    "summary": "Warehouses supply the industries and town buildings around them.",
+    "tags": [
+        "Script Mod",
+        "Warehouse"
+    ],
+    "url": "https://github.com/AlasdairH/tf3-warehouse-to-buildings"
+}

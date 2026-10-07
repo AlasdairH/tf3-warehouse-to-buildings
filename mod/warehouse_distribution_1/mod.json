@@ -1,0 +1,106 @@
+{
+    "cosmetic": false,
+    "dependencies": null,
+    "incompatibilities": null,
+    "modId": "warehouse_distribution_1",
+    "options": null,
+    "params": [
+        {
+            "defaultIndex": 2,
+            "key": "wdist_radius",
+            "name": "Delivery radius around a warehouse",
+            "tooltip": "Industries and town buildings this close to one of your warehouses get the cargo it holds that they take. Off: only the stations' catchment areas count (next option).",
+            "uiType": "ComboBox",
+            "values": [
+                "Off",
+                "100 m",
+                "200 m",
+                "300 m",
+                "500 m"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
+        },
+        {
+            "defaultIndex": 1,
+            "key": "wdist_stations",
+            "name": "Also deliver in the catchment area of its stations",
+            "tooltip": "A warehouse also supplies every industry and town building in the catchment area of a station whose catchment area holds the warehouse, the same buildings that station's vehicles could deliver to.",
+            "uiType": "ComboBox",
+            "values": [
+                "No",
+                "Yes"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
+        },
+        {
+            "defaultIndex": 2,
+            "key": "wdist_speed",
+            "name": "Items per warehouse per month",
+            "tooltip": "How many cargo items one warehouse hands out per month at most, shared between the buildings in reach, the emptiest first.",
+            "uiType": "ComboBox",
+            "values": [
+                "20",
+                "50",
+                "100",
+                "200",
+                "No limit"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
+        },
+        {
+            "defaultIndex": 2,
+            "key": "wdist_payment",
+            "name": "Payment for cargo handed out",
+            "tooltip": "Cargo a warehouse hands out never reaches its destination on a vehicle, so the game doesn't pay for it. The mod pays it like a delivery from where the cargo was produced to the building that took it, at the price the game pays for that cargo type, as income of the line that brought it to the warehouse.",
+            "uiType": "ComboBox",
+            "values": [
+                "None",
+                "50%",
+                "100%"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
+        },
+        {
+            "defaultIndex": 0,
+            "key": "wdist_which",
+            "name": "Warehouses that hand out cargo",
+            "tooltip": "All of your warehouses, or only those with [D] in their name (rename a warehouse in its window). Useful to keep transfer hubs from handing out cargo meant for elsewhere.",
+            "uiType": "ComboBox",
+            "values": [
+                "All of mine",
+                "Only names with [D]"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
+        },
+        {
+            "defaultIndex": 0,
+            "key": "wdist_diagnostics",
+            "name": "Diagnostics in the game log",
+            "tooltip": "Writes what the mod does (buildings in reach, every hand-out, learned prices, income) to the game log, stdout.txt.",
+            "uiType": "ComboBox",
+            "values": [
+                "No",
+                "Yes"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
+        }
+    ],
+    "postRunScript": {
+        "fileName": ""
+    },
+    "preRunScript": {
+        "fileName": ""
+    },
+    "revision": 1,
+    "runScript": {
+        "fileName": ""
+    },
+    "severityAdd": "None",
+    "severityRemove": "None"
+}

@@ -1,0 +1,8 @@
+{
+    "archives": null,
+    "files": [
+        "warehouse_distribution/rules.lua",
+        "warehouse_distribution/warehouse_distribution.gs.lua",
+        "warehouse_distribution/warehouse_distribution.script.lua"
+    ]
+}
