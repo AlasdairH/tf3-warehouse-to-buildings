@@ -77,6 +77,7 @@ Files:
 | `content/warehouse_distribution/warehouse_distribution.gs.lua` | registers the game script (`update`, `handleEvent`) |
 | `content/warehouse_distribution/warehouse_distribution.script.lua` | the game script: reach, moves, checks, payment |
 | `content/warehouse_distribution/rules.lua` | allocation, pricing, options: no game API, tested on its own |
+| `mod/warehouse_distribution_1/_metadata/0.png` | preview image (1920x1080), rendered from `assets/preview.svg` |
 | `tests/mock_engine.lua` | mock of the engine API, with switchable command behaviour |
 | `tests/*_test.lua` | tests; `tools/check.sh` runs them |
 
@@ -132,6 +133,10 @@ The mod can be added to running games.
 tools/check.sh          # JSON, _content.json, tests
 tools/check.sh --fix    # also rewrites _content.json after adding files
 lua tests/run.lua coal  # only tests whose name contains "coal"
+
+# preview image: edit assets/preview.svg, then
+npm install --prefix tools/.cache @resvg/resvg-js
+node tools/render_preview.js
 ```
 
 The scripts are plain Lua for the game's Lua 5.2 sandbox. That means no `unpack`, `rawget`, `loadstring`, `goto` or `//`; the test runner removes those globals so accidental use fails. Tuning values are in `CONFIG` at the top of `warehouse_distribution.script.lua`. Raise `REVISION` there when a release fixes something that made the mod stop, so games that stopped try again.

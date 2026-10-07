@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <title>Warehouse Distribution</title>
+  <!-- Mod preview (1920x1080). Render to mod/warehouse_distribution_1/_metadata/0.png with
+       tools/render_preview.js. -->
+  <defs>
+    <radialGradient id="bg" cx="1300" cy="520" r="1400" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2b4f6c"/>
+      <stop offset="0.5" stop-color="#18324a"/>
+      <stop offset="1" stop-color="#0a1522"/>
+    </radialGradient>
+    <radialGradient id="reach" cx="1300" cy="560" r="400" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4fa3e0" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#4fa3e0" stop-opacity="0.04"/>
+    </radialGradient>
+    <g id="crate">
+      <rect x="-17" y="-17" width="34" height="34" rx="4" fill="#d79a4a" stroke="#8a5a22" stroke-width="3"/>
+      <path d="M-17,-6 H17 M-17,6 H17" stroke="#8a5a22" stroke-width="3"/>
+    </g>
+  </defs>
+
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+
+  <!-- title -->
+  <g font-family="DejaVu Sans, Arial, sans-serif">
+    <text x="120" y="455" font-size="104" font-weight="bold" fill="#ffffff">Warehouse</text>
+    <text x="120" y="575" font-size="104" font-weight="bold" fill="#ffffff">Distribution</text>
+    <rect x="124" y="612" width="150" height="10" rx="5" fill="#f5a83a"/>
+    <text x="120" y="700" font-size="42" fill="#b9cadb">Warehouses supply the</text>
+    <text x="120" y="755" font-size="42" fill="#b9cadb">buildings around them</text>
+  </g>
+
+  <!-- reach of the warehouse -->
+  <circle cx="1300" cy="560" r="400" fill="url(#reach)" stroke="#7fbce8" stroke-width="5" stroke-dasharray="22 16" stroke-opacity="0.8"/>
+
+  <!-- train bringing cargo -->
+  <g transform="translate(905 905)">
+    <rect x="-230" y="44" width="470" height="8" rx="4" fill="#8aa2ba"/>
+    <g fill="#5d7690">
+      <rect x="-215" y="52" width="10" height="10"/><rect x="-165" y="52" width="10" height="10"/>
+      <rect x="-115" y="52" width="10" height="10"/><rect x="-65" y="52" width="10" height="10"/>
+      <rect x="-15" y="52" width="10" height="10"/><rect x="35" y="52" width="10" height="10"/>
+      <rect x="85" y="52" width="10" height="10"/><rect x="135" y="52" width="10" height="10"/>
+      <rect x="185" y="52" width="10" height="10"/>
+    </g>
+    <!-- wagon -->
+    <rect x="-200" y="-12" width="200" height="44" rx="6" fill="#6f8399"/>
+    <use href="#crate" transform="translate(-160 -32)"/>
+    <use href="#crate" transform="translate(-118 -32)"/>
+    <use href="#crate" transform="translate(-76 -32)"/>
+    <use href="#crate" transform="translate(-34 -32)"/>
+    <circle cx="-165" cy="38" r="12" fill="#26384a"/><circle cx="-35" cy="38" r="12" fill="#26384a"/>
+    <!-- locomotive -->
+    <rect x="12" y="-30" width="170" height="62" rx="10" fill="#3d8fd1"/>
+    <rect x="128" y="-70" width="54" height="46" rx="6" fill="#3d8fd1"/>
+    <rect x="138" y="-60" width="34" height="22" rx="3" fill="#cfe6f7"/>
+    <rect x="24" y="-18" width="94" height="10" rx="5" fill="#2a6ea6"/>
+    <circle cx="50" cy="38" r="13" fill="#26384a"/><circle cx="100" cy="38" r="13" fill="#26384a"/><circle cx="150" cy="38" r="13" fill="#26384a"/>
+  </g>
+  <!-- cargo into the warehouse -->
+  <g stroke-width="13" stroke-linecap="round" stroke-dasharray="1 24">
+    <line x1="1095" y1="845" x2="1195.5" y2="722.1" stroke="#ffffff"/>
+  </g>
+  <polygon points="-16,-19 24,0 -16,19" fill="#ffffff" transform="translate(1212 702) rotate(-50.7)"/>
+
+  <!-- cargo handed out -->
+  <g stroke-width="13" stroke-linecap="round" stroke-dasharray="1 24">
+    <line x1="1162" y1="447" x2="1124.3" y2="400.2" stroke="#f5a83a"/>
+    <line x1="1438" y1="447" x2="1477.3" y2="399.9" stroke="#f5a83a"/>
+    <line x1="1447" y1="652" x2="1481.6" y2="686.6" stroke="#f5a83a"/>
+  </g>
+  <polygon points="-16,-19 24,0 -16,19" fill="#f5a83a" transform="translate(1108 380) rotate(-128.9)"/>
+  <polygon points="-16,-19 24,0 -16,19" fill="#f5a83a" transform="translate(1494 380) rotate(-50.1)"/>
+  <polygon points="-16,-19 24,0 -16,19" fill="#f5a83a" transform="translate(1500 705) rotate(45.0)"/>
+
+  <!-- warehouse -->
+  <g transform="translate(1300 575) scale(0.82)">
+    <ellipse cx="0" cy="98" rx="200" ry="16" fill="#000000" opacity="0.25"/>
+    <rect x="-155" y="-62" width="310" height="155" rx="6" fill="#f5a83a"/>
+    <polygon points="-182,-58 0,-150 182,-58" fill="#c9752a"/>
+    <rect x="-182" y="-66" width="364" height="14" rx="5" fill="#a85f20"/>
+    <rect x="-34" y="-122" width="68" height="34" rx="4" fill="#f7c27a"/>
+    <rect x="-72" y="-6" width="144" height="99" rx="4" fill="#7a4a1c"/>
+    <g stroke="#9c6128" stroke-width="5">
+      <path d="M-72 14 H72 M-72 34 H72 M-72 54 H72 M-72 74 H72"/>
+    </g>
+    <use href="#crate" transform="translate(-122 76)"/>
+    <use href="#crate" transform="translate(-122 40)"/>
+    <use href="#crate" transform="translate(110 76)"/>
+  </g>
+
+  <!-- shop -->
+  <g transform="translate(1035 315) scale(0.88)">
+    <ellipse cx="0" cy="38" rx="115" ry="10" fill="#000000" opacity="0.25"/>
+    <rect x="-95" y="-95" width="190" height="130" rx="5" fill="#e8ecf1"/>
+    <rect x="-103" y="-108" width="206" height="18" rx="4" fill="#c3ccd7"/>
+    <g>
+      <rect x="-95" y="-72" width="38" height="28" fill="#3d8fd1"/><rect x="-57" y="-72" width="38" height="28" fill="#ffffff"/>
+      <rect x="-19" y="-72" width="38" height="28" fill="#3d8fd1"/><rect x="19" y="-72" width="38" height="28" fill="#ffffff"/>
+      <rect x="57" y="-72" width="38" height="28" fill="#3d8fd1"/>
+    </g>
+    <rect x="-78" y="-28" width="96" height="58" rx="3" fill="#4b6a88"/>
+    <rect x="34" y="-28" width="40" height="63" rx="3" fill="#6d8aa6"/>
+  </g>
+
+  <!-- factory -->
+  <g transform="translate(1575 330) scale(0.88)">
+    <ellipse cx="0" cy="38" rx="135" ry="10" fill="#000000" opacity="0.25"/>
+    <circle cx="92" cy="-196" r="15" fill="#ffffff" opacity="0.30"/>
+    <circle cx="112" cy="-226" r="20" fill="#ffffff" opacity="0.25"/>
+    <circle cx="142" cy="-254" r="25" fill="#ffffff" opacity="0.18"/>
+    <rect x="68" y="-180" width="30" height="130" fill="#c3ccd7"/>
+    <rect x="64" y="-186" width="38" height="12" rx="3" fill="#a9b4c2"/>
+    <rect x="-115" y="-62" width="230" height="97" rx="4" fill="#e8ecf1"/>
+    <polygon points="-115,-60 -115,-102 -58,-60 -58,-102 0,-60 0,-102 58,-60 58,-102 115,-60" fill="#aab6c4"/>
+    <g fill="#4b6a88">
+      <rect x="-98" y="-40" width="40" height="28" rx="3"/><rect x="-40" y="-40" width="40" height="28" rx="3"/>
+      <rect x="18" y="-40" width="40" height="28" rx="3"/>
+    </g>
+    <rect x="70" y="-36" width="34" height="71" rx="3" fill="#6d8aa6"/>
+  </g>
+
+  <!-- town buildings -->
+  <g transform="translate(1600 850) scale(0.88)">
+    <ellipse cx="-40" cy="38" rx="150" ry="11" fill="#000000" opacity="0.25"/>
+    <rect x="-70" y="-180" width="140" height="215" rx="5" fill="#e8ecf1"/>
+    <rect x="-78" y="-192" width="156" height="16" rx="4" fill="#c3ccd7"/>
+    <g fill="#4b6a88">
+      <rect x="-50" y="-160" width="28" height="30" rx="3"/><rect x="-14" y="-160" width="28" height="30" rx="3"/><rect x="22" y="-160" width="28" height="30" rx="3"/>
+      <rect x="-50" y="-115" width="28" height="30" rx="3"/><rect x="-14" y="-115" width="28" height="30" rx="3"/><rect x="22" y="-115" width="28" height="30" rx="3"/>
+      <rect x="-50" y="-70" width="28" height="30" rx="3"/><rect x="-14" y="-70" width="28" height="30" rx="3"/><rect x="22" y="-70" width="28" height="30" rx="3"/>
+    </g>
+    <rect x="-16" y="-25" width="32" height="60" rx="3" fill="#6d8aa6"/>
+    <!-- small house -->
+    <rect x="-200" y="-60" width="110" height="95" rx="4" fill="#dfe5ec"/>
+    <polygon points="-212,-56 -145,-112 -78,-56" fill="#aab6c4"/>
+    <rect x="-180" y="-38" width="30" height="28" rx="3" fill="#4b6a88"/>
+    <rect x="-132" y="-25" width="26" height="60" rx="3" fill="#6d8aa6"/>
+  </g>
+</svg>

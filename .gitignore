@@ -1,2 +1,4 @@
 dist/
 *.zip
+tools/.cache/
+node_modules/
