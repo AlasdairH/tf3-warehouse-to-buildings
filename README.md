@@ -4,14 +4,16 @@ A Transport Fever 3 script mod: your warehouses hand their cargo to the industri
 
 In the base game a warehouse is only storage for vehicles. The game manual says: *"Town buildings and factories do not have access to the warehouse's content. They rely on you to transport their cargo from or to them."* This mod gives them that access.
 
-> **Status: untested in the game.** Everything below is built against the official script API documentation and tested offline against a mock of the engine (50 tests, Lua 5.1, 5.2 and LuaJIT). The mod moves cargo with a command the game files under `debug`, and nobody has confirmed yet that the command works in a normal game. Do the [first test in the game](#first-test-in-the-game) on a new game or a copy of a save before you rely on it.
+> **Status: untested in the game.** Everything below is built against the official script API documentation and tested offline against a mock of the engine (59 tests, Lua 5.1, 5.2 and LuaJIT). The mod moves cargo with a command the game files under `debug`, and nobody has confirmed yet that the command works in a normal game. Do the [first test in the game](#first-test-in-the-game) on a new game or a copy of a save before you rely on it.
 
 ## What it does
 
 - Every quarter of an in-game day, each of your warehouses looks at the buildings in its reach:
   - industries and town buildings within a radius of the warehouse (default 200 m, measured from its edge to theirs),
   - and, if the option is on, every building in the catchment area of a station whose catchment area holds the warehouse. Those are the buildings the station's own vehicles could deliver to. Select the station to see them highlighted.
-- A building takes cargo if one of its **input stocks** takes a cargo type the warehouse holds and isn't full. Output stocks and residential buildings get nothing.
+- **Industries** take cargo into their **input stocks**, if a stock takes a cargo type the warehouse holds and isn't full. Output stocks get nothing.
+- **Town buildings** (commercial and industrial) take the cargo **their town needs** into their stocks. Where the game keeps a town building's needs isn't documented, so every stock that isn't an output counts. Residential buildings have no needs and get nothing.
+- Buildings are found by the engine's own search around the warehouse and by their outline. A building whose position the mod can't read is still found that way, or through a station's catchment area, including stations that list a building's parcels or person capacity rather than the building itself.
 - Cargo goes to the **emptiest** input stock first, one item at a time, so a small amount is shared fairly instead of going to whichever building comes first.
 - A warehouse hands out at most a set number of items per month (default 100). If it's idle, unused allowance builds up only to a quarter of a month's worth.
 - Only your own warehouses take part. With the option set, only warehouses with **[D]** in their name do. Rename one in its window. Use this to stop transfer hubs from handing out cargo meant for somewhere else.
@@ -107,12 +109,18 @@ Use a new free game, or a copy of a save, and set **Diagnostics in the game log:
    
    Then compare the income shown above the warehouse with the income above a truck that delivers the same cargo over a similar distance.
 6. **Mixed module:** put two cargo types into one universal module, of which the building takes only one. The other one must stay.
-7. **Town:** a warehouse with goods near the commercial or industrial district. Check the buildings' supply in their window and the town's cargo supply rating.
+7. **Town:** a warehouse with cargo the town needs, near the commercial or industrial district. Check the buildings' supply in their window and the town's cargo supply rating. If nothing arrives, the log explains why:
+   - `buildings: …` counts the town buildings that take cargo, those whose position is unknown, and those with no stock that takes cargo.
+   - `warehouse … : N buildings in reach (… industries, … town buildings; radius: …)` shows whether the town buildings are in reach.
+   - `warehouse … holds … but hands nothing out: …` is followed by one line per building in reach, showing what the mod sees. For example, `town building 1234 of town 56: stock 0 input [goods.cargo] 4/4` lists each stock's type, the cargo it takes (marked `not needed` if the town doesn't need it), and how full it is.
+   
+   Please send those lines.
 8. **Save and load:** distribution continues and nothing is paid twice.
 
 ## Known limits and open questions
 
 - **Debug command.** It may need Debug Mode, and a game update may change or remove it. The mod checks every use and stops rather than guess.
+- **Town buildings' stocks.** How TF3 stores a town building's cargo needs isn't documented. The mod fills any of its stocks that isn't an output, with the cargo its town needs. The diagnostics show what it found.
 - **Town growth.** The game gives towns XP when cargo arrives on a vehicle. Cargo handed out by a warehouse probably gives none. Whether a building's *supply* counts it is part of the in-game test.
 - **Statistics.** The industry and town windows won't list the warehouse as a supplier, and cargo handed out won't show in their "delivered" figures.
 - **Payment relies on internals.** It calls the base game's own price code, but the paths of the company and subsidy scripts and how they're called come from reading the game's scripts, not from documentation. Each part is checked, falls back to the learned price or ×1 if missing, and the log says what was used.

@@ -339,6 +339,104 @@ return function(test, env)
 	end)
 
 	---------------------------------------------------------------------------
+	-- Town buildings
+	---------------------------------------------------------------------------
+
+	-- a warehouse with goods and coal in a town that needs goods (commercial)
+	local function townScene()
+		local w, M, state = setup()
+		local town = w.town({ GOODS }, { FUEL })
+		local _, wsl, wcon = w.warehouse(0, 0, { { 100 } })
+		w.addItems(wsl, 0, GOODS, 20)
+		w.addItems(wsl, 0, COAL, 20)
+		return w, M, state, { town = town, wsl = wsl, wcon = wcon }
+	end
+
+	test("town: a building in reach gets the cargo its town needs, not other cargo its stock takes", function()
+		local w, M, state, s = townScene()
+		local _, b = w.townBuilding(80, 0, { COAL, GOODS }, 4, 0, { town = s.town })
+		run(w, M, state, 30)
+		assert(w.count(b, 0, GOODS) == 4 and w.count(b, 0, COAL) == 0, w.count(b, 0, GOODS) .. " " .. w.count(b, 0, COAL))
+	end)
+
+	test("town: a building known only by its parcels is in reach", function()
+		local w, M, state, s = townScene()
+		w.octree = false
+		local _, b = w.townBuilding(80, 0, { GOODS }, 4, 0, { town = s.town, position = "parcels" })
+		run(w, M, state, 30)
+		assert(w.count(b, 0, GOODS) == 4)
+	end)
+
+	test("town: a building with no position is found by the engine's search around the warehouse", function()
+		local w, M, state, s = townScene()
+		local _, b = w.townBuilding(80, 0, { GOODS }, 4, 0, { town = s.town, position = "none" })
+		local _, far = w.townBuilding(900, 0, { GOODS }, 4, 0, { town = s.town, position = "none" })
+		run(w, M, state, 30)
+		assert(w.count(b, 0, GOODS) == 4 and w.count(far, 0, GOODS) == 0)
+	end)
+
+	test("town: a building with no position in a station's catchment area is supplied", function()
+		local w, M, state, s = townScene()
+		w.octree = false
+		w.setOption("wdist_radius", 1)
+		local tb, b = w.townBuilding(80, 0, { GOODS }, 4, 0, { town = s.town, position = "none" })
+		w.station({ s.wcon, tb })
+		run(w, M, state, 30)
+		assert(w.count(b, 0, GOODS) == 4)
+	end)
+
+	test("town: a catchment area that lists parcels or person capacities finds their buildings", function()
+		local w, M, state, s = townScene()
+		w.octree = false
+		w.setOption("wdist_radius", 1)
+		local tbA, a = w.townBuilding(80, 0, { GOODS }, 4, 0, { town = s.town, position = "parcels" })
+		local _, b, pcB = w.townBuilding(0, 80, { GOODS }, 4, 0, { town = s.town, position = "none" })
+		local parcel = w.comps[tbA].TOWN_BUILDING.parcels[1]
+		w.station({ s.wcon, parcel, pcB })
+		run(w, M, state, 30)
+		assert(w.count(a, 0, GOODS) == 4 and w.count(b, 0, GOODS) == 4, w.count(a, 0, GOODS) .. " " .. w.count(b, 0, GOODS))
+	end)
+
+	test("town: a building that keeps its needs in a storage stock is supplied", function()
+		local w, M, state, s = townScene()
+		local _, b = w.townBuilding(80, 0, { GOODS }, 4, 0, { town = s.town, stockType = mock.STORAGE })
+		run(w, M, state, 30)
+		assert(w.count(b, 0, GOODS) == 4)
+	end)
+
+	test("town: a building whose stock names a set of cargo types gets only what its town needs", function()
+		local w, M, state, s = townScene()
+		local _, b = w.townBuilding(80, 0, { GOODS, COAL }, 4, 0, { town = s.town, asSet = true })
+		run(w, M, state, 30)
+		assert(w.count(b, 0, GOODS) == 4 and w.count(b, 0, COAL) == 0)
+	end)
+
+	test("town: an industry's storage stock still gets nothing, only its input stocks", function()
+		local w, M, state = setup()
+		local _, wsl = w.warehouse(0, 0, { { 100 } })
+		w.addItems(wsl, 0, COAL, 20)
+		local sl = w.stockList({ { type = mock.STORAGE, cargoType = COAL, capacity = 50 } })
+		local con = w.new({ CONSTRUCTION = {}, BOUNDING_VOLUME = { bbox = { min = { x = 60, y = -20, z = 0 }, max = { x = 100, y = 20, z = 10 } } } })
+		w.new({ INDUSTRY = { stockList = sl, construction = con } })
+		run(w, M, state, 30)
+		assert(w.count(sl, 0, COAL) == 0)
+	end)
+
+	test("diagnostics say why a warehouse hands nothing out, building by building", function()
+		local w, M, state, s = townScene()
+		w.setOption("wdist_diagnostics", 2)
+		local tb, b = w.townBuilding(80, 0, { GOODS }, 4, 0, { town = s.town })
+		w.addItems(b, 0, GOODS, 4)
+		w.house(0, 80)
+		run(w, M, state, 5)
+		assert(w.logHas("hands nothing out: no building in reach has room"), table.concat(w.log, "\n"))
+		assert(w.logHas("town building " .. tb .. " of town " .. s.town .. ": stock 0 input %[goods.cargo%] 4/4"),
+			table.concat(w.log, "\n"))
+		assert(w.logHas("buildings: .*town building: takes cargo 1"), table.concat(w.log, "\n"))
+		assert(w.logHas("town building: no stock that takes cargo 1"))
+	end)
+
+	---------------------------------------------------------------------------
 	-- Payment
 	---------------------------------------------------------------------------
 

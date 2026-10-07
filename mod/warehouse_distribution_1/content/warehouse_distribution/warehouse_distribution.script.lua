@@ -300,8 +300,25 @@ local function footprintOf(entity)
 	end
 	if f == nil then
 		local tb = comp(entity, CT().TOWN_BUILDING)
-		if tb ~= nil and valid(tb.construction) then
-			f = ownFootprint(tb.construction)
+		if tb ~= nil then
+			if valid(tb.construction) then
+				f = ownFootprint(tb.construction)
+			end
+			-- the parcels it stands on
+			for _, parcel in ipairs(f == nil and tb.parcels or {}) do
+				local pf = ownFootprint(parcel)
+				if pf ~= nil then
+					if f == nil then
+						f = pf
+					else
+						f = { x0 = math.min(f.x0, pf.x0), y0 = math.min(f.y0, pf.y0), x1 = math.max(f.x1, pf.x1),
+							y1 = math.max(f.y1, pf.y1), z = math.min(f.z or 0, pf.z or 0) }
+					end
+				end
+			end
+			if f == nil and valid(tb.personCapacity) then
+				f = ownFootprint(tb.personCapacity)
+			end
 		end
 	end
 	return f
@@ -335,13 +352,36 @@ local function cargoName(c)
 	return tostring(c)
 end
 
-local inputStockType = nil
+local stockTypes = nil
+
+local function stockType(name)
+	if stockTypes == nil then
+		local e = api.type["enum"].StockListType
+		stockTypes = { input = field(e, "InputStock"), output = field(e, "OutputStock"), storage = field(e, "StorageStock") }
+	end
+	return stockTypes[name]
+end
 
 local function isInput(stock)
-	if inputStockType == nil then
-		inputStockType = api.type["enum"].StockListType.InputStock
+	return stock.type == stockType("input")
+end
+
+local function stockTypeName(stock)
+	for _, name in ipairs({ "input", "output", "storage" }) do
+		if stock.type == stockType(name) then
+			return name
+		end
 	end
-	return stock.type == inputStockType
+	return "type " .. tostring(stock.type)
+end
+
+-- Stocks a building takes cargo into: input stocks; a town building also
+-- any stock that isn't an output (where it keeps its needs isn't documented).
+local function receives(kind, stock)
+	if isInput(stock) then
+		return true
+	end
+	return kind == "town building" and stock.type ~= stockType("output")
 end
 
 local function stocksOf(stockList)
@@ -349,21 +389,77 @@ local function stocksOf(stockList)
 	return sl ~= nil and sl.stocks or {}
 end
 
--- cargo types an input stock takes
-local function acceptedCargo(stockList, stockId, stock)
-	local out = {}
-	local ok, list = pcall(api.engine.util.stock.getStockCargoTypes, stockList, stockId)
-	if ok and type(list) == "table" then
-		for _, c in ipairs(list) do
-			if cargoType(c) then
-				table.insert(out, c)
+-- the cargo types a town needs (all its districts), nil if unknown; cached
+-- until the reach is found again
+local townNeedsCache = {}
+
+local function townNeeds(town)
+	if not valid(town) then
+		return nil
+	end
+	local cached = townNeedsCache[town]
+	if cached == nil then
+		cached = false
+		local t = comp(town, CT().TOWN)
+		local needs = t ~= nil and field(t, "cargoNeeds") or nil
+		if type(needs) == "table" then
+			local set, any = {}, false
+			for _, district in pairs(needs) do
+				for _, need in pairs(type(district) == "table" and district or {}) do
+					local c = type(need) == "table" and need[1] or need
+					if cargoType(c) then
+						set[c] = true
+						any = true
+					end
+				end
+			end
+			if any then
+				cached = set
 			end
 		end
+		townNeedsCache[town] = cached
 	end
-	if #out == 0 and cargoType(stock.cargoType) then
-		table.insert(out, stock.cargoType)
+	return cached or nil
+end
+
+-- Cargo types a building's stock takes: what the game says the stock takes,
+-- else its cargo type, else its set of cargo types. For a town building only
+-- those its town needs. Second result: before that filter.
+local function acceptedCargo(stockList, stockId, stock, consumer)
+	local out, seen = {}, {}
+	local function add(c)
+		if cargoType(c) and not seen[c] then
+			seen[c] = true
+			table.insert(out, c)
+		end
 	end
-	return out
+	local ok, list = pcall(apiFn("engine", "util", "stock", "getStockCargoTypes"), stockList, stockId)
+	if ok and type(list) == "table" then
+		for _, c in ipairs(list) do
+			add(c)
+		end
+	end
+	if #out == 0 then
+		add(stock.cargoType)
+	end
+	local set = field(stock, "cargoTypes")
+	if #out == 0 and set ~= nil then
+		pcall(apiFn("res", "cargoTypeRep", "forEachCargoType"), set, add)
+	end
+	if consumer == nil or consumer.kind ~= "town building" then
+		return out, out
+	end
+	local needs = townNeeds(consumer.town)
+	if needs == nil then
+		return out, out
+	end
+	local needed = {}
+	for _, c in ipairs(out) do
+		if needs[c] then
+			table.insert(needed, c)
+		end
+	end
+	return needed, out
 end
 
 local function countOf(stockList, stockId, c)
@@ -427,7 +523,8 @@ local cache = {
 	reach = nil, -- warehouse construction -> list of consumers, closest first
 	reachAt = nil,
 	reachKey = nil, -- warehouses and options the reach was found for
-	consumers = {}, -- consumer entity -> { entity, kind, stockList, footprint }
+	consumers = {}, -- consumer entity -> { entity, kind, stockList, footprint, town }
+	explained = {}, -- warehouse construction -> true once its idle buildings were described
 	refused = {}, -- "stockList:stockId" -> game time until which it is skipped
 }
 
@@ -458,40 +555,57 @@ local function readWarehouses(now)
 	return out
 end
 
-local function addConsumer(entity, kind, stockList)
+-- what the last search for buildings found, for the diagnostics
+local census = nil
+
+local function count(key)
+	if census ~= nil then
+		census[key] = (census[key] or 0) + 1
+	end
+end
+
+-- The building as a consumer, nil if it takes no cargo. Its footprint may be
+-- unknown (nil): then it can only be in reach through a station's catchment
+-- area or the engine's search around the warehouse.
+local function addConsumer(entity, kind, stockList, town)
 	if not valid(stockList) then
+		count(kind .. ": no stock list")
 		return nil
 	end
 	ownerOfStockList[stockList] = entity
-	local hasInput = false
+	local c = cache.consumers[entity]
+	if c ~= nil then
+		return c
+	end
+	local takes = false
 	for _, st in ipairs(stocksOf(stockList)) do
-		if isInput(st) then
-			hasInput = true
+		if receives(kind, st) then
+			takes = true
 			break
 		end
 	end
-	if not hasInput then
+	if not takes then
+		count(kind .. ": no stock that takes cargo")
 		return nil
 	end
-	local c = cache.consumers[entity]
-	if c == nil then
-		local f = footprintOf(entity)
-		if f == nil then
-			return nil
-		end
-		c = { entity = entity, kind = kind, stockList = stockList, footprint = f }
-		cache.consumers[entity] = c
-	end
+	c = { entity = entity, kind = kind, stockList = stockList, footprint = footprintOf(entity), town = town }
+	count(kind .. (c.footprint ~= nil and ": takes cargo" or ": takes cargo, position unknown"))
+	cache.consumers[entity] = c
 	return c
 end
 
--- the consumer (industry or town building with input stocks) an entity is,
--- or the ones its construction holds
-local function consumersOf(entity, out)
+local personCapacityOwners = nil
+
+-- The consumers (industries and town buildings that take cargo) an entity
+-- stands for: the building itself, the buildings of its construction, or the
+-- building of its stock list, parcel or person capacity. Returns true if the
+-- entity is a building at all (even one that takes nothing).
+local function consumersOf(entity, out, depth)
+	depth = depth or 0
 	local c = cache.consumers[entity]
 	if c ~= nil then
 		table.insert(out, c)
-		return
+		return true
 	end
 	local ind = comp(entity, CT().INDUSTRY)
 	if ind ~= nil then
@@ -499,39 +613,57 @@ local function consumersOf(entity, out)
 		if c ~= nil then
 			table.insert(out, c)
 		end
-		return
+		return true
 	end
 	local tb = comp(entity, CT().TOWN_BUILDING)
 	if tb ~= nil then
-		c = addConsumer(entity, "town building", tb.stockList)
+		c = addConsumer(entity, "town building", tb.stockList, tb.town)
 		if c ~= nil then
 			table.insert(out, c)
 		end
-		return
+		return true
 	end
 	local con = comp(entity, CT().CONSTRUCTION) or comp(parentConstruction(entity), CT().CONSTRUCTION)
+	local found = false
 	if con ~= nil then
 		for _, e in ipairs(con.industries or {}) do
-			local i = comp(e, CT().INDUSTRY)
-			c = i ~= nil and addConsumer(e, "industry", i.stockList) or nil
-			if c ~= nil then
-				table.insert(out, c)
-			end
+			found = consumersOf(e, out, depth + 1) or found
 		end
 		for _, e in ipairs(con.townBuildings or {}) do
-			local t = comp(e, CT().TOWN_BUILDING)
-			c = t ~= nil and addConsumer(e, "town building", t.stockList) or nil
-			if c ~= nil then
-				table.insert(out, c)
-			end
+			found = consumersOf(e, out, depth + 1) or found
 		end
 	end
+	if found or depth > 0 then
+		return found
+	end
+	-- a stock list, parcel or person capacity of a building
+	local owner = ownerOfStockList[entity]
+	if owner == nil then
+		local ok, b = pcall(apiFn("engine", "system", "townBuildingSystem", "getBuilding"), entity)
+		if ok and valid(b) and b ~= entity then
+			owner = b
+		end
+	end
+	if owner == nil then
+		if personCapacityOwners == nil then
+			local ok, map = pcall(apiFn("engine", "system", "townBuildingSystem", "getPersonCapacity2townBuildingMap"))
+			personCapacityOwners = ok and type(map) == "table" and map or {}
+		end
+		owner = personCapacityOwners[entity]
+	end
+	if valid(owner) and owner ~= entity then
+		return consumersOf(owner, out, depth + 1)
+	end
+	return false
 end
 
--- every industry and town building with input stocks; also fills
+-- every industry and town building that takes cargo; also fills
 -- ownerOfStockList, which the price learning needs
 local function readConsumers()
 	cache.consumers = {}
+	townNeedsCache = {}
+	personCapacityOwners = nil
+	census = {}
 	local all = {}
 	for _, e in ipairs(entitiesWith(CT().INDUSTRY)) do
 		local ind = comp(e, CT().INDUSTRY)
@@ -542,12 +674,48 @@ local function readConsumers()
 	end
 	for _, e in ipairs(entitiesWith(CT().TOWN_BUILDING)) do
 		local tb = comp(e, CT().TOWN_BUILDING)
-		local c = tb ~= nil and addConsumer(e, "town building", tb.stockList) or nil
+		local c = tb ~= nil and addConsumer(e, "town building", tb.stockList, tb.town) or nil
 		if c ~= nil then
 			table.insert(all, c)
 		end
 	end
+	local parts = {}
+	for k, n in pairs(census) do
+		table.insert(parts, k .. " " .. n)
+	end
+	table.sort(parts)
+	diag("buildings: %s", #parts > 0 and table.concat(parts, ", ") or "none")
+	census = nil
 	return all
+end
+
+local function vec2(x, y)
+	local ok, v = pcall(apiFn("type", "Vec2f", "new"), x, y)
+	if ok and v ~= nil and field(v, "x") == x and field(v, "y") == y then
+		return v
+	end
+	ok, v = pcall(apiFn("type", "Vec2f", "new"))
+	if ok and v ~= nil and pcall(function()
+		v.x = x
+		v.y = y
+	end) then
+		return v
+	end
+	return { x = x, y = y }
+end
+
+-- entities with a component within r of (x, y), from the engine's own
+-- spatial search; nil if the game has none
+local function inCircle(x, y, r, componentType)
+	local find = apiFn("engine", "util", "octree", "findEntitiesInCircle")
+	if find == nil then
+		return nil
+	end
+	local ok, list = pcall(find, vec2(x, y), r, componentType)
+	if ok and type(list) == "table" then
+		return list
+	end
+	return nil
 end
 
 local function reachKey(warehouses)
@@ -567,16 +735,40 @@ local function readReach(warehouses, now)
 		gaps[w.construction] = {}
 	end
 
+	local how = {}
 	if options.radius > 0 then
 		for _, w in ipairs(warehouses) do
 			if w.footprint ~= nil then
-				for _, c in ipairs(all) do
-					local g = rules.gap(w.footprint, c.footprint)
-					if g <= options.radius then
-						sets[w.construction][c.entity] = c
-						gaps[w.construction][c.entity] = g
+				-- the engine's search, around the warehouse's centre out to its edge plus the radius
+				local f = w.footprint
+				local ctr = rules.centre(f)
+				local r = options.radius + math.max(f.x1 - f.x0, f.y1 - f.y0) / 2
+				for _, ct in ipairs({ CT().INDUSTRY, CT().TOWN_BUILDING }) do
+					local hits = inCircle(ctr.x, ctr.y, r, ct)
+					if hits ~= nil then
+						how[w.construction] = "engine search"
+						for _, e in ipairs(hits) do
+							local list = {}
+							consumersOf(e, list)
+							for _, c in ipairs(list) do
+								sets[w.construction][c.entity] = c
+							end
+						end
 					end
 				end
+				-- and the buildings whose footprint is known
+				for _, c in ipairs(all) do
+					if c.footprint ~= nil then
+						local g = rules.gap(w.footprint, c.footprint)
+						if g <= options.radius then
+							sets[w.construction][c.entity] = c
+							gaps[w.construction][c.entity] = g
+						end
+					end
+				end
+				how[w.construction] = (how[w.construction] and how[w.construction] .. " and " or "") .. "footprints"
+			else
+				how[w.construction] = "warehouse position unknown"
 			end
 		end
 	end
@@ -592,19 +784,21 @@ local function readReach(warehouses, now)
 		for _, station in ipairs(entitiesWith(CT().STATION)) do
 			local ok, catchables = pcall(api.engine.system.catchmentAreaSystem.getStationCatchables, station, true)
 			if ok and type(catchables) == "table" then
-				local inReach, consumers = {}, {}
+				local inReach, consumers, unknown = {}, {}, {}
 				for _, e in ipairs(catchables) do
 					local w = whOf[e] or whOf[parentConstruction(e)]
 					if w ~= nil then
 						inReach[w] = true
-					else
-						consumersOf(e, consumers)
+					elseif not consumersOf(e, consumers) and #unknown < 5 then
+						table.insert(unknown, e)
 					end
 				end
 				for w in pairs(inReach) do
 					for _, c in ipairs(consumers) do
 						sets[w][c.entity] = c
 					end
+					diag("station %d reaches warehouse %d: %d of its %d catchables take cargo%s", station, w, #consumers,
+						#catchables, #unknown > 0 and (", not buildings: " .. table.concat(unknown, ", ")) or "")
 				end
 			end
 		end
@@ -619,7 +813,7 @@ local function readReach(warehouses, now)
 		local g = gaps[w.construction]
 		local function gapOf(c)
 			if g[c.entity] == nil then
-				g[c.entity] = w.footprint ~= nil and rules.gap(w.footprint, c.footprint) or 0
+				g[c.entity] = (w.footprint ~= nil and c.footprint ~= nil) and rules.gap(w.footprint, c.footprint) or 0
 			end
 			return g[c.entity]
 		end
@@ -631,7 +825,13 @@ local function readReach(warehouses, now)
 			return x.entity < y.entity
 		end)
 		cache.reach[w.construction] = list
-		diag("warehouse %d (%s): %d buildings in reach", w.construction, tostring(w.name), #list)
+		local kinds = {}
+		for _, c in ipairs(list) do
+			kinds[c.kind] = (kinds[c.kind] or 0) + 1
+		end
+		diag("warehouse %d (%s): %d buildings in reach (%d industries, %d town buildings; radius: %s)", w.construction,
+			tostring(w.name), #list, kinds["industry"] or 0, kinds["town building"] or 0, how[w.construction] or "off")
+		cache.explained[w.construction] = nil
 	end
 	cache.reachAt = now
 	cache.reachKey = reachKey(warehouses)
@@ -1225,7 +1425,13 @@ end
 -- SimCargo of the items that left the warehouse, `arrived` the items the
 -- building got (they stand in for them in the price scripts' event).
 local function charge(s, w, consumer, c, left, arrived, now)
-	local to = spot(consumer.footprint)
+	-- a building whose position is unknown is within reach of the warehouse: measure to the warehouse
+	local at = consumer.footprint or w.footprint
+	if at == nil then
+		report("nopos", "can't price cargo handed out: neither the warehouse's nor the building's position is known")
+		return
+	end
+	local to = spot(at)
 	local from0 = w.footprint ~= nil and spot(w.footprint) or to
 	local items, entries = {}, {}
 	for i, sc in ipairs(left) do
@@ -1497,15 +1703,15 @@ local function refusedNow(stockList, stockId, now)
 	return until_ ~= nil and now < until_
 end
 
--- the input stocks in reach that take cargo the warehouse holds
+-- the stocks of the buildings in reach that take cargo the warehouse holds
 local function demandsFor(w, holds, now)
 	local demands = {}
 	for _, consumer in ipairs(cache.reach[w.construction] or {}) do
 		for i, st in ipairs(stocksOf(consumer.stockList)) do
 			local sid = i - 1
-			if isInput(st) and not refusedNow(consumer.stockList, sid, now) then
+			if receives(consumer.kind, st) and not refusedNow(consumer.stockList, sid, now) then
 				local wanted = {}
-				for _, c in ipairs(acceptedCargo(consumer.stockList, sid, st)) do
+				for _, c in ipairs((acceptedCargo(consumer.stockList, sid, st, consumer))) do
 					if holds[c] then
 						table.insert(wanted, c)
 					end
@@ -1561,6 +1767,53 @@ local function supplyOf(w, now)
 	return supply, holds
 end
 
+-- one building's stocks as the mod sees them, for the diagnostics
+local function describeConsumer(c)
+	local parts = {}
+	for i, st in ipairs(stocksOf(c.stockList)) do
+		local sid = i - 1
+		local takes, all = acceptedCargo(c.stockList, sid, st, c)
+		local names = {}
+		for _, x in ipairs(all) do
+			local needed = false
+			for _, y in ipairs(takes) do
+				needed = needed or y == x
+			end
+			table.insert(names, cargoName(x) .. (needed and "" or " (not needed)"))
+		end
+		table.insert(parts, string.format("stock %d %s%s [%s] %d/%s%s", sid, stockTypeName(st),
+			receives(c.kind, st) and "" or " (not filled)", table.concat(names, ", "), totalOf(c.stockList, sid),
+			tostring(st.capacity), refusedNow(c.stockList, sid, gameTime()) and " (refused, skipped)" or ""))
+	end
+	return string.format("%s %d%s%s: %s", c.kind, c.entity, valid(c.town) and (" of town " .. c.town) or "",
+		c.footprint == nil and " (position unknown)" or "", #parts > 0 and table.concat(parts, "; ") or "no stocks")
+end
+
+-- says once per search for buildings why a warehouse that holds cargo hands
+-- none out: what its buildings in reach take, town buildings first
+local function explainIdle(w, holds, why)
+	if options == nil or not options.diagnostics or cache.explained[w.construction] then
+		return
+	end
+	cache.explained[w.construction] = true
+	local held = {}
+	for c in pairs(holds) do
+		table.insert(held, cargoName(c))
+	end
+	table.sort(held)
+	local list = cache.reach[w.construction] or {}
+	diag("warehouse %d holds %s but hands nothing out: %s", w.construction, table.concat(held, ", "), why)
+	local shown = 0
+	for _, kind in ipairs({ "town building", "industry" }) do
+		for _, c in ipairs(list) do
+			if c.kind == kind and shown < 8 then
+				shown = shown + 1
+				diag("  %s", describeConsumer(c))
+			end
+		end
+	end
+end
+
 local function distribute(s, w, now, dt)
 	local perMonth = options.perMonth
 	local cap = math.min(CONFIG.maxItemsPerTick, math.max(1, perMonth * CONFIG.budgetCapMonths))
@@ -1581,6 +1834,8 @@ local function distribute(s, w, now, dt)
 	end
 	local demands = demandsFor(w, holds, now)
 	if #demands == 0 then
+		explainIdle(w, holds, #(cache.reach[w.construction] or {}) == 0 and "no buildings in reach"
+			or "no building in reach has room for what it holds")
 		return true
 	end
 	local plan = rules.plan(supply, demands, n)
@@ -1761,11 +2016,13 @@ M._reset = function()
 	reported = {}
 	ownerOfStockList = {}
 	passengerCargo = nil
-	inputStockType = nil
+	stockTypes = nil
+	townNeedsCache = {}
+	personCapacityOwners = nil
 	nextCheck = nil
 	cache.warehouses, cache.warehousesAt = nil, nil
 	cache.reach, cache.reachAt, cache.reachKey = nil, nil, nil
-	cache.consumers, cache.refused = {}, {}
+	cache.consumers, cache.refused, cache.explained = {}, {}, {}
 end
 
 function data()

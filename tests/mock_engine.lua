@@ -24,7 +24,7 @@ mock.copy = copy
 local CT = {}
 for _, name in ipairs({ "GAME_TIME", "NAME", "STATION", "SIM_CARGO", "TOWN", "INDUSTRY", "STOCK_LIST",
 	"TOWN_BUILDING", "TRANSPORT_VEHICLE", "BOUNDING_VOLUME", "CONSTRUCTION", "PLAYER_OWNED", "WAREHOUSE",
-	"LINE" }) do
+	"LINE", "PERSON_CAPACITY", "PARCEL" }) do
 	CT[name] = name
 end
 
@@ -38,6 +38,7 @@ local CARGO_NAMES = { [1] = "coal.cargo", [2] = "iron_ore.cargo", [3] = "steel.c
 mock.COAL, mock.IRON, mock.STEEL, mock.GOODS, mock.FUEL = 1, 2, 3, 4, 5
 
 local INPUT, OUTPUT, STORAGE = 1, 2, 3
+mock.INPUT, mock.OUTPUT, mock.STORAGE = INPUT, OUTPUT, STORAGE
 
 -- checks that a value can be saved with the game: plain data only
 local function assertSavable(v, path)
@@ -87,6 +88,10 @@ function mock.new()
 		log = {},
 		mode = "typed",
 		limit = {},
+		parcelOwner = {},
+		personCapacityOwner = {},
+		hiddenPos = {}, -- where buildings are, for the engine's search
+		octree = true,
 		balance = 1000000,
 		modParams = { warehouse_distribution_1 = {} },
 		acceptName = function(name)
@@ -127,7 +132,8 @@ function mock.new()
 	function w.stockList(stocks)
 		local list = {}
 		for i, st in ipairs(stocks) do
-			list[i] = { type = st.type, cargoType = st.cargoType or -1, capacity = st.capacity or 0, accepts = st.accepts }
+			list[i] = { type = st.type, cargoType = st.cargoType or -1, capacity = st.capacity or 0, accepts = st.accepts,
+			cargoTypes = st.cargoTypes }
 		end
 		local sl = w.new({ STOCK_LIST = { stocks = list } })
 		w.items[sl] = {}
@@ -175,12 +181,52 @@ function mock.new()
 		return ind, sl, con
 	end
 
-	-- a town building with one input stock that takes `accepts` (list)
-	function w.townBuilding(x, y, accepts, capacity, z)
-		local sl = w.stockList({ { type = INPUT, accepts = accepts, capacity = capacity or 4,
-			cargoType = #accepts == 1 and accepts[1] or -1 } })
-		local tb = w.new({ TOWN_BUILDING = { stockList = sl, construction = -1 }, BOUNDING_VOLUME = box(x, y, 10, z) })
-		return tb, sl
+	-- a town building with one input stock that takes `accepts` (list). Options:
+	-- town (its town entity), stockType (default input), asSet (the stock names its cargo
+	-- as a set of cargo types the game's util doesn't resolve), position = "box" (its own
+	-- bounding box, default), "parcels" (only its parcels have one) or "none" (only the
+	-- engine's search knows where it is)
+	function w.townBuilding(x, y, accepts, capacity, z, options)
+		options = options or {}
+		local stock = { type = options.stockType or INPUT, accepts = accepts, capacity = capacity or 4,
+			cargoType = #accepts == 1 and accepts[1] or -1 }
+		if options.asSet then
+			local names = {}
+			for _, c in ipairs(accepts) do
+				table.insert(names, CARGO_NAMES[c])
+			end
+			stock.accepts, stock.cargoType = nil, -1
+			stock.cargoTypes = { cargoClassesIncluded = {}, cargoClassesExcluded = {}, cargoTypesIncluded = names, cargoTypesExcluded = {} }
+		end
+		local sl = w.stockList({ stock })
+		local pc = w.new({ PERSON_CAPACITY = {} })
+		local tbc = { stockList = sl, construction = -1, town = options.town or -1, personCapacity = pc, parcels = {} }
+		local tb = w.new({ TOWN_BUILDING = tbc })
+		local position = options.position or "box"
+		if position == "box" then
+			w.comps[tb].BOUNDING_VOLUME = box(x, y, 10, z)
+		elseif position == "parcels" then
+			for _, dx in ipairs({ -3, 3 }) do
+				local parcel = w.new({ PARCEL = {}, BOUNDING_VOLUME = box(x + dx, y, 6, z) })
+				table.insert(tbc.parcels, parcel)
+				w.parcelOwner[parcel] = tb
+			end
+		end
+		w.personCapacityOwner[pc] = tb
+		w.hiddenPos[tb] = { x = x, y = y, z = z or 0 }
+		return tb, sl, pc
+	end
+
+	-- a town that needs `commercial` and `industrial` cargo types (lists)
+	function w.town(commercial, industrial)
+		local function needs(list)
+			local out = {}
+			for _, c in ipairs(list or {}) do
+				table.insert(out, { c, 10 })
+			end
+			return out
+		end
+		return w.new({ TOWN = { cargoNeeds = { {}, needs(commercial), needs(industrial) } } })
 	end
 
 	-- a residential building: no input stock
@@ -361,9 +407,31 @@ function mock.new()
 						return w.balance
 					end,
 				},
+				octree = {
+					findEntitiesInCircle = function(center, r, ct)
+						assert(type(center.x) == "number" and type(r) == "number")
+						if not w.octree then
+							error("no octree")
+						end
+						local out = {}
+						for e, c in pairs(w.comps) do
+							if c[ct] ~= nil then
+								local p = w.hiddenPos[e] or w.positionOf(e)
+								if p ~= nil and math.sqrt((p.x - center.x) ^ 2 + (p.y - center.y) ^ 2) <= r then
+									table.insert(out, e)
+								end
+							end
+						end
+						table.sort(out)
+						return out
+					end,
+				},
 				stock = {
 					getStockCargoTypes = function(sl, sid)
 						local stock = w.comps[sl].STOCK_LIST.stocks[sid + 1]
+						if stock.cargoTypes ~= nil then
+							return {}
+						end
 						if stock.accepts ~= nil then
 							return copy(stock.accepts)
 						end
@@ -393,6 +461,14 @@ function mock.new()
 						return copy(w.catchables[station] or {})
 					end,
 				},
+				townBuildingSystem = {
+					getBuilding = function(parcel)
+						return w.parcelOwner[parcel] or -1
+					end,
+					getPersonCapacity2townBuildingMap = function()
+						return copy(w.personCapacityOwner)
+					end,
+				},
 				streetConnectorSystem = {
 					getConstructionEntityForSubconstruction = function()
 						return -1
@@ -418,6 +494,15 @@ function mock.new()
 				end,
 				getPassengerCargoTypeId = function()
 					return 0
+				end,
+				forEachCargoType = function(set, callback)
+					for _, name in ipairs(set.cargoTypesIncluded or {}) do
+						for id, n in pairs(CARGO_NAMES) do
+							if n == name then
+								callback(id)
+							end
+						end
+					end
 				end,
 			},
 		},
@@ -462,6 +547,11 @@ function mock.new()
 			Vec3f = {
 				new = function(x, y, z)
 					return { x = x, y = y, z = z }
+				end,
+			},
+			Vec2f = {
+				new = function(x, y)
+					return { x = x, y = y }
 				end,
 			},
 		},
